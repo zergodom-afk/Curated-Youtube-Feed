@@ -73,3 +73,10 @@ test('player: end screens and cards removed, ads untouched', () => {
   assert.ok(Array.isArray(p.adPlacements));
   assert.equal(p.videoDetails.videoId, 'abc');
 });
+
+test('"#shorts" in the title marks a Short even in a normal video renderer', () => {
+  const seen = [];
+  X.prune({ items: [{ videoWithContextRenderer: { videoId: 'abcdefghijk', headline: { runs: [{ text: 'wait for the end #shorts' }] } } }] },
+    { decide: m => { seen.push(m); return { remove: false }; } });
+  assert.equal(seen[0].isShort, true);
+});

@@ -194,7 +194,7 @@
       if (d.action !== 'show') {
         // one entry per video: a reload re-evaluates the same items
         filterLog = filterLog.filter(x => x.id !== meta.id);
-        filterLog.push({ id: meta.id, title: meta.title, channel: meta.channel, durationText: meta.durationText, reason: d.reason, action: d.action, mode: modeKey(), at: Date.now() });
+        filterLog.push({ id: meta.id, title: meta.title, channel: meta.channel, durationText: meta.durationText, isShort: !!meta.isShort, reason: d.reason, action: d.action, mode: modeKey(), at: Date.now() });
         if (filterLog.length > 200) filterLog = filterLog.slice(-150);
       }
       if (d.action === 'shelf') autoShelf(meta, prof, d.reason);
@@ -551,7 +551,7 @@
     return {
       id, title, channel: '', description: all.slice(0, 400),
       durationText: durMatch ? durMatch[1] : null,
-      isShort: /\/shorts\//.test(href) || /shorts|reel/.test(tag),
+      isShort: /\/shorts\//.test(href) || /shorts|reel/.test(tag) || /#shorts?\b/i.test(title),
       isLive: /\bLIVE\b/.test(all), kind: /radio/.test(tag) ? 'mix' : 'video',
     };
   }
@@ -1242,15 +1242,20 @@
   // Teach: quick check (current mood) · sort my feed (all moods) · mood editor
   // ---------------------------------------------------------------------------
   /** Every video YouTube offered on this page, in feed order (shown and held back). */
+  /** A Short – by renderer, link, "#shorts" in the title, or (older log entries) by the reason it was hidden. */
+  function looksShort(m) { return !!(m.isShort || /#shorts?\b/i.test(m.title || '') || /^Short\b/.test(m.reason || '')); }
+
   function candidates() {
     const out = [], seen = new Set();
+    // With Shorts turned off, they don't show up for teaching either.
+    const skipShorts = !!S.hideShorts;
     for (const v of verdicts.values()) {
       const m = v.meta;
-      if (!m || !m.id || !m.title || m.isShort || m.kind !== 'video' || seen.has(m.id)) continue;
+      if (!m || !m.id || !m.title || m.kind !== 'video' || seen.has(m.id) || (skipShorts && looksShort(m))) continue;
       seen.add(m.id); out.push(Object.assign({ _ctx: v.context }, m));
     }
     for (const x of filterLog.slice().reverse()) {
-      if (!x.id || !x.title || seen.has(x.id)) continue;
+      if (!x.id || !x.title || seen.has(x.id) || (skipShorts && looksShort(x))) continue;
       seen.add(x.id); out.push(Object.assign({ kind: 'video', _ctx: 'home' }, x));
     }
     return out;

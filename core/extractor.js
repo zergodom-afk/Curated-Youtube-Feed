@@ -149,6 +149,7 @@
     if (/"LIVE"|BADGE_STYLE_TYPE_LIVE_NOW|"LIVE NOW"|THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE/.test(blob)) meta.isLive = true;
     meta.isAd = AD_KEYS.includes(key);
 
+    if (/#shorts?\b/i.test(meta.title)) meta.isShort = true;
     const strings = collectStrings(r, [], 14);
     const seen = new Set([meta.title, meta.channel]);
     meta.description = strings.filter(s => !seen.has(s) && !DURATION_RE.test(s)).slice(0, 12).join(' · ');

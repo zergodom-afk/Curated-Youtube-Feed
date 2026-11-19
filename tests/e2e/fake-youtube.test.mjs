@@ -468,3 +468,32 @@ test('unclear videos are kept hidden while YouTube\'s category is looked up, the
   assert.deepEqual(lookups.sort(), ['aurora00001', 'lecture0001']);
   await ctx.close();
 });
+
+test('Teach never offers Shorts while Shorts are turned off', { skip: !chromium && 'playwright not installed' }, async () => {
+  const ctx = await browser.newContext({ viewport: { width: 400, height: 800 } });
+  await ctx.addInitScript(() => localStorage.setItem('mindful:lastCheckIn', String(Date.now())));
+  await ctx.addInitScript({ content: bundle() });
+  const items = [
+    { richItemRenderer: { content: vwc('normal00001', 'Cozy cottage garden tour', 'Slow Living', '18:20') } },
+    { richItemRenderer: { content: { shortsLockupViewModel: { entityId: 'shorts-shelf-item-shortitem01', overlayMetadata: { primaryText: { content: 'You will not believe this cat' } }, onTap: { innertubeCommand: { reelWatchEndpoint: { videoId: 'shortitem01' } } } } } } },
+    { richItemRenderer: { content: vwc('hashshort01', 'Tiny kitchen hack #shorts', 'Hacks', '0:45') } },
+    { richItemRenderer: { content: vwc('normal00002', 'Why do cats purr? Explained', 'Science Bits', '6:12') } },
+  ];
+  const data = { contents: { singleColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { content: { richGridRenderer: { contents: items } } } }] } } };
+  await ctx.route('**/*', route => new URL(route.request().url()).hostname !== 'm.youtube.com' ? route.abort()
+    : route.fulfill({ contentType: 'text/html', body: `<!doctype html><html><body>${RENDER}<script>var ytInitialData = ${JSON.stringify(data)};</script><div id="feed"></div></body></html>` }));
+  const page = await ctx.newPage();
+  await page.goto('https://m.youtube.com/');
+  const ui = page.locator('#mindful-feed-ui');
+  await ui.locator('.fab').click();
+  await ui.getByRole('button', { name: /Teach/ }).click();
+  await ui.getByRole('button', { name: /Sort my feed/ }).click();
+  const titles = [];
+  for (let i = 0; i < 6; i++) {
+    if (!(await ui.getByRole('button', { name: /^Skip$/ }).count())) break;
+    titles.push((await ui.locator('.card .t').first().innerText()).trim());
+    await ui.getByRole('button', { name: /^Skip$/ }).click();
+  }
+  assert.deepEqual(titles.sort(), ['Cozy cottage garden tour', 'Why do cats purr? Explained']);
+  await ctx.close();
+});
