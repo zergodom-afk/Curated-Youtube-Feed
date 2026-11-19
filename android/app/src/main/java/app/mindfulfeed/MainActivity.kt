@@ -34,7 +34,7 @@ import org.json.JSONObject
 import java.util.concurrent.Executors
 
 /**
- * A single WebView showing m.youtube.com, with core/*.js injected at document
+ * A single WebView showing m.youtube.com, with the core JS bundle injected at document
  * start. All filtering happens in that script; this activity only provides:
  *  - injection + an origin-restricted message channel for the optional AI pass
  *  - Google sign-in compatible WebView settings
