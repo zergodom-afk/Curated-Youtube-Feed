@@ -1,0 +1,1645 @@
+/*
+ * Mindful Feed – in-page runtime for m.youtube.com / www.youtube.com.
+ *
+ * Injected at document start (Android WebView via addDocumentStartJavaScript,
+ * or as a userscript). Requires classifier.js, extractor.js and policy.js to
+ * have run first (the build concatenates them).
+ *
+ *  1. Intercepts YouTube's own JSON (ytInitialData + /youtubei/v1/*) and
+ *     prunes videos that don't fit your current state, *before* rendering.
+ *  2. A DOM safety net hides anything that slipped through, removes the
+ *     recommendation rails on the watch page and the Shorts tab.
+ *  3. Mood check-in, Later shelf, filter log and settings live in a small
+ *     panel (shadow DOM) behind the 🧭 button.
+ *  4. Optional AI classification through the Android host (MindfulNative).
+ *
+ * Never uses innerHTML (YouTube enforces Trusted Types).
+ */
+(function () {
+  'use strict';
+  if (window.__mindfulFeed) return;
+  if (window.top !== window) return;
+  window.__mindfulFeed = true;
+
+  const C = window.MindfulClassifier;
+  const X = window.MindfulExtractor;
+  const P = window.MindfulPolicy;
+  const Lr = window.MindfulLearner;
+  const Pr = window.MindfulProfile;
+  if (!C || !X || !P || !Lr || !Pr) { console.warn('[MindfulFeed] core modules missing'); return; }
+
+  // ---------------------------------------------------------------------------
+  // Storage (localStorage on the YouTube origin; survives app restarts)
+  // ---------------------------------------------------------------------------
+  const NS = 'mindful:';
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(NS + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(NS + k, JSON.stringify(v)); } catch (e) { /* quota / disabled */ } },
+  };
+
+  let S = P.merge(store.get('settings', null));
+  function saveSettings() { store.set('settings', S); }
+
+  let shelf = store.get('shelf', []);
+  let shelfStats = store.get('shelfStats', { letGo: 0, watched: 0, since: Date.now() });
+  let letGoIds = store.get('letGoIds', {}); // id -> timestamp, so auto-catch doesn't re-add right away
+  let infoState = store.get('info', { day: '', count: 0, ids: [], lastActive: 0 });
+  let filterLog = store.get('log', []);
+  let aiCache = store.get('aiCache', {});
+  let lastCheckIn = store.get('lastCheckIn', 0);
+  let currentPreset = store.get('preset', null);
+  let learner = Lr.load(store.get('learner', null));
+  function saveLearner() { store.set('learner', learner); }
+  if (learner.v < 2) { Lr.migrateToMoods(learner, P.PRESETS); saveLearner(); }
+
+  // What each mood means to you (setup questionnaire).
+  let profile = store.get('profile', null);
+  function saveProfile() { store.set('profile', profile); }
+  function currentMoodProfile() { return Pr.moodProfileFor(profile, modeKey(), currentPreset && allMoods()[currentPreset]); }
+
+  // YouTube's own details (category, tags, description) for videos we're unsure about.
+  let enrich = store.get('enrich', {});
+  const enrichQueue = [], pending = new Set();
+  let enrichBusy = false, enrichFails = 0, enrichThisPage = 0, enrichStatus = 'idle', pendingStyle = null;
+
+  // Moods = built-in presets + moods you created yourself.
+  let customMoods = store.get('moods', []);
+  function saveMoods() { store.set('moods', customMoods); }
+  function allMoods() {
+    const o = {};
+    for (const k of Object.keys(P.PRESETS)) o[k] = P.PRESETS[k];
+    for (const m of customMoods) o[m.id] = m;
+    return o;
+  }
+  function moodList() {
+    const all = allMoods();
+    return Object.keys(all).map(k => ({ key: k, label: all[k].emoji + ' ' + all[k].label }));
+  }
+  /** Feedback is learned per mood; without a mood (manual fine-tuning) per need. */
+  function modeKey() { return currentPreset && allMoods()[currentPreset] ? currentPreset : 'need:' + S.need; }
+  function modeLabel() {
+    const pr = currentPreset && allMoods()[currentPreset];
+    return pr ? pr.emoji + ' ' + pr.label : (P.NEED_LABELS[S.need] || S.need);
+  }
+
+  const verdicts = new Map(); // id -> {meta, prof, d}
+  const profiles = new Map();
+
+  // Mutable runtime state (declared up front: hooks may fire early).
+  let native = null, aiQueue = [], aiInFlight = 0, aiStatus = 'unavailable', aiReqSeq = 1;
+  const aiPending = new Map();
+  let host = null, shadow = null, wrapEl = null, fabEl = null, chipEl = null, rateChipEl = null;
+  let panelOpen = false, activeTab = 'now', checkInOpen = false;
+  let styleEl = null, scanQueued = false, dirty = false;
+  let lastHref = location.href, lastWatched = null;
+  let postsChip = false, lastPath = location.pathname;                      // the "Posts" chip above the feed is selected
+  let pageShown = new Set(), pageHeld = new Set(), statEl = null;
+  let checkInAsk = null;                       // preset key whose follow-up question is showing
+  let fb = null;                               // open feedback sheet: {meta, step, reasons:Set, blockChannel}
+  let teach = null;                            // Teach tab state: {view:'home'|'quick'|'sort'|'editor', …}
+  let loadState = null, autoFillRounds = 0, autoFillTimer = null, lastUserInput = 0;
+  for (const ev of ['touchstart', 'wheel', 'keydown', 'mousedown']) {
+    window.addEventListener(ev, () => { lastUserInput = Date.now(); }, { capture: true, passive: true });
+  }
+
+  function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
+  function refreshInfoWindow() {
+    const now = Date.now();
+    if (S.infoBudgetWindow === 'session') {
+      if (now - (infoState.lastActive || 0) > 3 * 3600 * 1000) infoState = { day: todayKey(), count: 0, ids: [], lastActive: now };
+    } else if (infoState.day !== todayKey()) {
+      infoState = { day: todayKey(), count: 0, ids: [], lastActive: now };
+    }
+    infoState.lastActive = now;
+  }
+  function infoUsed() { refreshInfoWindow(); return infoState.count; }
+
+  function persistSoon() {
+    clearTimeout(persistSoon.t);
+    persistSoon.t = setTimeout(() => {
+      store.set('shelf', shelf); store.set('shelfStats', shelfStats); store.set('letGoIds', letGoIds);
+      store.set('info', infoState); store.set('log', filterLog.slice(-150));
+      const keys = Object.keys(aiCache);
+      if (keys.length > 2500) { for (const k of keys.slice(0, keys.length - 2000)) delete aiCache[k]; }
+      store.set('aiCache', aiCache);
+    }, 400);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Context
+  // ---------------------------------------------------------------------------
+  function pageContext(pathname) {
+    const p = pathname || location.pathname;
+    if (p === '/' || p.startsWith('/feed/what_to_watch') || p === '/index') return 'home';
+    if (p.startsWith('/feed/subscriptions')) return 'subscriptions';
+    if (p.startsWith('/feed/history') || p.startsWith('/feed/library') || p.startsWith('/feed/you') || p.startsWith('/playlist')) return 'playlist';
+    if (p.startsWith('/results')) return 'search';
+    if (p.startsWith('/watch')) return 'watch';
+    if (p.startsWith('/shorts')) return 'shorts';
+    if (/^\/(@|channel\/|c\/|user\/)/.test(p)) return 'channel';
+    return 'other';
+  }
+  function contextFromBrowseId(id) {
+    if (!id) return null;
+    if (id === 'FEwhat_to_watch') return 'home';
+    if (id === 'FEsubscriptions') return 'subscriptions';
+    if (/^FE(history|library|you|playlist|downloads)/.test(id) || id.startsWith('VL')) return 'playlist';
+    if (id.startsWith('UC')) return 'channel';
+    return 'other';
+  }
+  function currentVideoId() {
+    try { return new URLSearchParams(location.search).get('v'); } catch (e) { return null; }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Classification + decisions
+  // ---------------------------------------------------------------------------
+  function withDetails(meta) {
+    const e = meta.id && enrich[meta.id];
+    if (!e) return meta;
+    return Object.assign({}, meta, { category: e.c || null, tags: e.t || [], description: ((meta.description || '') + ' · ' + (e.d || '')).slice(0, 800) });
+  }
+
+  function profileFor(meta) {
+    const key = meta.id || meta.title;
+    let prof = profiles.get(key);
+    if (!prof) {
+      const m = withDetails(meta);
+      prof = C.classify(m);
+      if (meta.id && aiCache[meta.id]) prof = C.mergeAi(prof, aiCache[meta.id]);
+      prof = Pr.personalize(prof, m, profile && profile.calibration, C.titleComplexity);
+      profiles.set(key, prof);
+      if (S.aiEnabled && meta.id && !aiCache[meta.id] && meta.kind === 'video' && !meta.isShort) aiEnqueue(meta);
+    }
+    return prof;
+  }
+
+  /** Pure decision (no logging, no shelf side effects). */
+  function decisionFor(meta, context) {
+    const learned = Lr.judge(learner, meta, modeKey());
+    const prof = Lr.adjustProfile(profileFor(meta), learned);
+    return { prof, d: P.decide(meta, prof, S, { context, infoUsed: infoUsed(), learned, moodProfile: currentMoodProfile() }) };
+  }
+
+  function evaluate(meta, context) {
+    const { prof, d } = decisionFor(meta, context);
+    const prev = verdicts.get(meta.id);
+    verdicts.set(meta.id, { meta, prof, d, context });
+    if (context === 'home' || context === 'subscriptions') {
+      (d.action === 'show' ? pageShown : pageHeld).add(meta.id);
+      (d.action === 'show' ? pageHeld : pageShown).delete(meta.id);
+      updateStat();
+    }
+    if (!prev || prev.d.action !== d.action) {
+      if (d.action !== 'show') {
+        // one entry per video: a reload re-evaluates the same items
+        filterLog = filterLog.filter(x => x.id !== meta.id);
+        filterLog.push({ id: meta.id, title: meta.title, channel: meta.channel, durationText: meta.durationText, isShort: !!meta.isShort, reason: d.reason, action: d.action, mode: modeKey(), at: Date.now() });
+        if (filterLog.length > 200) filterLog = filterLog.slice(-150);
+      }
+      if (d.action === 'shelf') autoShelf(meta, prof, d.reason);
+      persistSoon();
+    }
+    return d;
+  }
+
+  function autoShelf(meta, prof, reason) {
+    if (!meta.id) return;
+    const lg = letGoIds[meta.id];
+    if (lg && Date.now() - lg < 30 * 86400000) return;
+    if (infoState.ids.includes(meta.id)) return;
+    const r = P.shelfAdd(shelf, {
+      id: meta.id, title: meta.title, channel: meta.channel, durationText: meta.durationText,
+      load: prof.load, topics: prof.topics, source: 'auto', reason,
+    }, S);
+    shelf = r.shelf;
+    for (const x of r.letGo) { letGoIds[x.id] = Date.now(); shelfStats.letGo++; }
+    updateFabDot();
+  }
+
+  function saveToShelf(meta) {
+    const prof = profileFor(meta);
+    const r = P.shelfAdd(shelf, {
+      id: meta.id, title: meta.title, channel: meta.channel, durationText: meta.durationText,
+      load: prof.load, topics: prof.topics, source: 'saved', reason: 'saved by you',
+    }, S);
+    shelf = r.shelf;
+    for (const x of r.letGo) { letGoIds[x.id] = Date.now(); shelfStats.letGo++; }
+    persistSoon(); updateFabDot();
+  }
+
+  function letGo(id) {
+    shelf = shelf.filter(x => x.id !== id);
+    letGoIds[id] = Date.now(); shelfStats.letGo++;
+    persistSoon(); updateFabDot();
+  }
+
+  function expireShelf() {
+    const r = P.shelfExpire(shelf, S);
+    if (r.letGo.length) {
+      shelf = r.shelf;
+      for (const x of r.letGo) { letGoIds[x.id] = Date.now(); shelfStats.letGo++; }
+      persistSoon();
+    }
+    for (const id of Object.keys(letGoIds)) if (Date.now() - letGoIds[id] > 40 * 86400000) delete letGoIds[id];
+  }
+
+  // ---------------------------------------------------------------------------
+  // JSON interception
+  // ---------------------------------------------------------------------------
+  function apiKind(url) {
+    const m = /\/youtubei\/v1\/(browse|next|search|player|guide)(?:\?|$)/.exec(String(url || ''));
+    return m ? m[1] : null;
+  }
+
+  function transform(kind, json, reqBody) {
+    if (!json || typeof json !== 'object' || !S.enabled) return json;
+    let body = null;
+    try { body = reqBody ? JSON.parse(reqBody) : null; } catch (e) { /* ignore */ }
+    try {
+      if (kind === 'player') return X.prunePlayer(json, { hideEndscreens: S.hideEndscreens });
+      if (kind === 'guide') return json;
+      if (kind === 'next' || (kind === 'initial' && X.isWatchNext(json))) {
+        const vid = (body && body.videoId) || currentVideoId();
+        if (S.disableAutoplay) X.pruneAutoplay(json);
+        if (S.hideRelated) {
+          X.prune(json, { watchPage: true, currentVideoId: vid, hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn('related') });
+        } else {
+          X.prune(json, { decide: m => toVerdict(evaluate(m, 'related')), hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn('related') });
+        }
+        return json;
+      }
+      let context = contextFromBrowseId(body && body.browseId);
+      if (!context) context = kind === 'search' ? 'search' : pageContext();
+      if (context === 'watch') context = 'related';
+      X.prune(json, {
+        decide: m => {
+          if (!m.id) return { remove: false };
+          const d = evaluate(m, context);
+          // Unsure? Keep it in the page (hidden) and ask YouTube for its category first.
+          if (d.unclear && wantDetails(m)) { queueDetails(m); return { remove: false }; }
+          return toVerdict(d);
+        },
+        hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn(context),
+      });
+    } catch (e) {
+      console.warn('[MindfulFeed] transform failed', e);
+    }
+    return json;
+  }
+  // ---- details lookup (category / tags) for unclear videos ------------------
+  function wantDetails(m) {
+    return S.enrich && S.enabled && m.kind === 'video' && !m.isShort && !enrich[m.id] && enrichFails < 3 && enrichThisPage < 40;
+  }
+  function queueDetails(m) {
+    if (pending.has(m.id)) return;
+    pending.add(m.id); enrichQueue.push(m); enrichThisPage++;
+    updatePendingCss();
+    setTimeout(pumpDetails, 50);
+  }
+  function updatePendingCss() {
+    if (!document.documentElement) return;
+    if (!pendingStyle) { pendingStyle = document.createElement('style'); pendingStyle.id = 'mindful-feed-pending'; }
+    const ids = Array.from(pending).slice(-150).filter(id => /^[\w-]{11}$/.test(id));
+    pendingStyle.textContent = ids.length ? ids.map(id => ':is(ytm-rich-item-renderer,ytm-video-with-context-renderer,ytm-media-item,ytd-rich-item-renderer):has(a[href*="' + id + '"])').join(',') + '{display:none!important}' : '';
+    if (!pendingStyle.isConnected) (document.head || document.documentElement).appendChild(pendingStyle);
+  }
+  function ytcfgGet(k) {
+    const c = window.ytcfg;
+    if (!c) return undefined;
+    if (typeof c.get === 'function') return c.get(k);
+    return c.data_ ? c.data_[k] : undefined;
+  }
+  async function fetchDetails(id) {
+    const context = ytcfgGet('INNERTUBE_CONTEXT');
+    if (!context) throw new Error('YouTube page config not found');
+    const key = ytcfgGet('INNERTUBE_API_KEY');
+    const headers = { 'content-type': 'application/json' };
+    const cn = ytcfgGet('INNERTUBE_CONTEXT_CLIENT_NAME'), cv = ytcfgGet('INNERTUBE_CLIENT_VERSION');
+    if (cn) headers['X-Youtube-Client-Name'] = String(cn);
+    if (cv) headers['X-Youtube-Client-Version'] = String(cv);
+    const r = await origFetch.call(window, '/youtubei/v1/player?prettyPrint=false' + (key ? '&key=' + encodeURIComponent(key) : ''), {
+      method: 'POST', credentials: 'same-origin', headers,
+      body: JSON.stringify({ context, videoId: id, contentCheckOk: true, racyCheckOk: true }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const vd = j.videoDetails || {};
+    const mf = (j.microformat && j.microformat.playerMicroformatRenderer) || {};
+    return {
+      c: mf.category || null,
+      t: (vd.keywords || []).slice(0, 20),
+      d: String(vd.shortDescription || X.text(mf.description) || '').slice(0, 400),
+      at: Date.now(),
+    };
+  }
+  async function pumpDetails() {
+    if (enrichBusy || !enrichQueue.length) return;
+    enrichBusy = true;
+    const m = enrichQueue.shift();
+    try {
+      enrich[m.id] = await fetchDetails(m.id);
+      enrichFails = 0; enrichStatus = 'ok – ' + Object.keys(enrich).length + ' videos looked up';
+      const keys = Object.keys(enrich);
+      if (keys.length > 3000) for (const k of keys.slice(0, keys.length - 2500)) delete enrich[k];
+      store.set('enrich', enrich);
+    } catch (e) {
+      enrichFails++; enrichStatus = 'paused: ' + e.message;
+    }
+    pending.delete(m.id);
+    profiles.delete(m.id);
+    const v = verdicts.get(m.id);
+    if (v) evaluate(v.meta, v.context);
+    updatePendingCss(); queueScan();
+    enrichBusy = false;
+    if (enrichFails >= 3) { // YouTube didn't cooperate – stop asking, show what we have.
+      for (const x of enrichQueue.splice(0)) pending.delete(x.id);
+      updatePendingCss(); queueScan();
+      return;
+    }
+    if (enrichQueue.length) setTimeout(pumpDetails, 600);
+  }
+
+  /** Posts stay only where you asked for them: the "Posts" chip, or a channel's own page. */
+  function hidePostsIn(context) { return !!S.hidePosts && !postsChip && context !== 'channel'; }
+
+  const POSTS_CHIP_RE = /^(posts?|community( posts)?|beitr(ä|ae)ge|community-beitr(ä|ae)ge|publicaciones|publications|posts de la comunidad)$/i;
+  function chipText(el) {
+    const chip = el && el.closest && el.closest('ytm-chip-cloud-chip-renderer,yt-chip-cloud-chip-renderer,chip-shape,yt-chip-shape,.chip-bar-contents [role="tab"],ytm-feed-filter-chip-bar-renderer [role="tab"]');
+    return chip ? (chip.textContent || '').trim().replace(/\s+/g, ' ') : null;
+  }
+  // Remember which chip you tap before YouTube fetches that chip's feed.
+  document.addEventListener('click', e => {
+    const t = chipText(e.target);
+    if (t == null) return;
+    postsChip = POSTS_CHIP_RE.test(t);
+    updatePostsClass();
+  }, true);
+  function updatePostsClass() {
+    if (!document.documentElement) return;
+    document.documentElement.classList.toggle('mf-hide-posts', hidePostsIn(normalizeCtx(pageContext())));
+  }
+
+  function toVerdict(d) { return { remove: d.action !== 'show', reason: d.reason }; }
+
+  function transformText(kind, raw, reqBody) {
+    if (typeof raw !== 'string') return raw;
+    let prefix = '';
+    let txt = raw;
+    if (txt.startsWith(")]}'")) { const nl = txt.indexOf('\n'); prefix = txt.slice(0, nl + 1); txt = txt.slice(nl + 1); }
+    try { return prefix + JSON.stringify(transform(kind, JSON.parse(txt), reqBody)); } catch (e) { return raw; }
+  }
+
+  // fetch
+  const origFetch = window.fetch;
+  if (typeof origFetch === 'function') {
+    window.fetch = async function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+      const kind = apiKind(url);
+      if (!kind || !S.enabled) return origFetch.apply(this, arguments);
+      let reqBody = init && typeof init.body === 'string' ? init.body : null;
+      if (!reqBody && input && typeof input === 'object' && typeof input.clone === 'function') {
+        try { reqBody = await input.clone().text(); } catch (e) { /* ignore */ }
+      }
+      const resp = await origFetch.apply(this, arguments);
+      try {
+        if (!resp.ok) return resp;
+        const raw = await resp.clone().text();
+        const out = transformText(kind, raw, reqBody);
+        const headers = new Headers(resp.headers);
+        headers.delete('content-length'); headers.delete('content-encoding');
+        const r = new Response(out, { status: resp.status, statusText: resp.statusText, headers });
+        try { Object.defineProperty(r, 'url', { value: resp.url }); } catch (e) { /* ignore */ }
+        return r;
+      } catch (e) {
+        return resp;
+      }
+    };
+  }
+
+  // XMLHttpRequest
+  (function patchXhr() {
+    const proto = XMLHttpRequest.prototype;
+    const open = proto.open, send = proto.send;
+    const rtDesc = Object.getOwnPropertyDescriptor(proto, 'responseText');
+    const rDesc = Object.getOwnPropertyDescriptor(proto, 'response');
+    if (!rtDesc || !rDesc) return;
+    proto.open = function (method, url) { this.__mfUrl = String(url); return open.apply(this, arguments); };
+    proto.send = function (body) {
+      const kind = apiKind(this.__mfUrl);
+      if (kind && S.enabled) {
+        const xhr = this;
+        const reqBody = typeof body === 'string' ? body : null;
+        let cachedText = null, cachedObj = null;
+        Object.defineProperty(xhr, 'responseText', {
+          configurable: true,
+          get() {
+            const raw = rtDesc.get.call(xhr);
+            if (xhr.readyState !== 4) return raw;
+            if (cachedText === null) cachedText = transformText(kind, raw, reqBody);
+            return cachedText;
+          },
+        });
+        Object.defineProperty(xhr, 'response', {
+          configurable: true,
+          get() {
+            const raw = rDesc.get.call(xhr);
+            if (xhr.readyState !== 4) return raw;
+            const rt = xhr.responseType;
+            if (rt === '' || rt === 'text') { if (cachedText === null) cachedText = transformText(kind, raw, reqBody); return cachedText; }
+            if (rt === 'json') { if (cachedObj === null) cachedObj = transform(kind, raw, reqBody); return cachedObj; }
+            return raw;
+          },
+        });
+      }
+      return send.apply(this, arguments);
+    };
+  })();
+
+  // ytInitialData / ytInitialPlayerResponse (embedded in the first HTML page)
+  function hookGlobal(name, kind) {
+    let value;
+    const apply = v => {
+      if (v == null) return v;
+      if (typeof v === 'string') return transformText(kind, v, null);
+      return transform(kind, v, null);
+    };
+    try { if (window[name] !== undefined) value = apply(window[name]); } catch (e) { /* ignore */ }
+    try {
+      Object.defineProperty(window, name, {
+        configurable: true, enumerable: true,
+        get() { return value; },
+        set(v) { value = apply(v); },
+      });
+    } catch (e) { /* ignore */ }
+  }
+  hookGlobal('ytInitialData', 'initial');
+  hookGlobal('ytInitialPlayerResponse', 'player');
+
+  // ---------------------------------------------------------------------------
+  // DOM safety net
+  // ---------------------------------------------------------------------------
+  const CARD_SEL = [
+    'ytm-rich-item-renderer', 'ytm-video-with-context-renderer', 'ytm-compact-video-renderer',
+    'ytm-media-item', 'ytm-reel-item-renderer', 'ytm-shorts-lockup-view-model',
+    'ytm-shorts-lockup-view-model-v2', 'ytm-lockup-view-model', 'yt-lockup-view-model',
+    'ytm-compact-radio-renderer', 'ytm-video-card-renderer', 'ytm-compact-autoplay-renderer',
+    'ytd-rich-item-renderer', 'ytd-video-renderer', 'ytd-compact-video-renderer',
+    'ytd-grid-video-renderer', 'ytd-reel-item-renderer', 'ytd-compact-radio-renderer',
+  ].join(',');
+  const PROTECTED_SEL = [
+    'ytm-playlist-panel-renderer', 'ytd-playlist-panel-renderer', 'ytm-playlist-video-list-renderer',
+    'ytd-playlist-video-list-renderer', 'ytm-playlist-panel-video-renderer', 'ytd-playlist-panel-video-renderer',
+  ].join(',');
+
+  function baseCss() {
+    const rules = [];
+    rules.push('.mf-hidden{display:none!important}');
+    rules.push('.mf-badge{cursor:pointer;display:inline-flex;gap:4px;align-items:center;margin:2px 12px 6px;padding:2px 8px;border-radius:999px;font:500 11px/1.6 Roboto,Arial,sans-serif;background:rgba(127,127,127,.15);color:inherit;opacity:.85;width:max-content;max-width:90%}');
+    if (S.hideShorts) {
+      rules.push('ytm-reel-shelf-renderer,ytm-shorts-lockup-view-model,ytm-shorts-lockup-view-model-v2,ytd-reel-shelf-renderer,ytd-rich-shelf-renderer[is-shorts],grid-shelf-view-model:has(ytm-shorts-lockup-view-model),ytm-rich-section-renderer:has(ytm-shorts-lockup-view-model),ytm-rich-section-renderer:has(ytm-reel-shelf-renderer),ytm-pivot-bar-item-renderer:has(.pivot-shorts),ytd-guide-entry-renderer:has(a[title="Shorts"]),ytd-mini-guide-entry-renderer[aria-label="Shorts"]{display:none!important}');
+    }
+    if (S.hidePosts) {
+      const posts = ['ytm-backstage-post-thread-renderer', 'ytm-backstage-post-renderer', 'ytm-post-renderer', 'ytm-shared-post-renderer',
+        'ytd-backstage-post-thread-renderer', 'ytd-backstage-post-renderer', 'ytd-post-renderer', 'ytd-shared-post-renderer', 'ytm-post-view-model', 'ytd-post-view-model'];
+      const sel = [];
+      for (const p of posts) sel.push('html.mf-hide-posts ' + p, 'html.mf-hide-posts ytm-rich-item-renderer:has(' + p + ')', 'html.mf-hide-posts ytd-rich-item-renderer:has(' + p + ')',
+        'html.mf-hide-posts ytm-rich-section-renderer:has(' + p + ')', 'html.mf-hide-posts ytd-rich-section-renderer:has(' + p + ')');
+      rules.push(sel.join(',') + '{display:none!important}');
+    }
+    if (S.hideAds) {
+      rules.push('ytm-promoted-sparkles-web-renderer,ytm-companion-ad-renderer,ad-slot-renderer,ytm-ad-slot-renderer,ytd-ad-slot-renderer,ytm-rich-item-renderer:has(ad-slot-renderer),ytd-rich-item-renderer:has(ytd-ad-slot-renderer){display:none!important}');
+    }
+    if (S.hideRelated) {
+      rules.push('html.mf-watch ytm-item-section-renderer[section-identifier="related-items"],html.mf-watch ytm-watch-next-secondary-results-renderer,html.mf-watch ytd-watch-next-secondary-results-renderer,html.mf-watch #related,html.mf-watch ytm-compact-autoplay-renderer,html.mf-watch ytm-single-column-watch-next-results-renderer ytm-reel-shelf-renderer,html.mf-watch ytm-single-column-watch-next-results-renderer ytm-horizontal-card-list-renderer,html.mf-watch ytm-merch-shelf-renderer,html.mf-watch ytd-merch-shelf-renderer{display:none!important}');
+    }
+    if (S.hideEndscreens) {
+      rules.push('.ytp-ce-element,.ytp-endscreen-content,.ytp-videowall-still,.videowall-endscreen,.ytp-suggestion-set,.ytp-pause-overlay,.ytp-autonav-endscreen,.ytm-autonav-endscreen,.ytp-fullscreen-grid,.ytp-fullerscreen-edu-button,.ytp-modern-videowall-still{display:none!important}');
+    }
+    if (S.disableAutoplay) {
+      rules.push('.ytm-autonav-toggle-button-container,ytm-autonav-toggle-button-container,.ytp-autonav-toggle-button-container,.ytp-autonav-toggle{display:none!important}');
+    }
+    if (S.hideCommentsCompletely) {
+      rules.push('ytm-comments-entry-point-header-renderer,ytm-comment-section-renderer,ytm-engagement-panel-section-list-renderer[target-id*="comment"],ytd-comments,#comments{display:none!important}');
+    }
+    return rules.join('\n');
+  }
+
+  function applyCss() {
+    if (!document.documentElement) return;
+    if (!styleEl) { styleEl = document.createElement('style'); styleEl.id = 'mindful-feed-css'; }
+    styleEl.textContent = baseCss();
+    if (!styleEl.isConnected) (document.head || document.documentElement).appendChild(styleEl);
+  }
+
+  function idFromHref(href) {
+    if (!href) return null;
+    let m = /[?&]v=([\w-]{11})/.exec(href); if (m) return m[1];
+    m = /\/shorts\/([\w-]{11})/.exec(href); if (m) return m[1];
+    return null;
+  }
+
+  function cardMeta(card) {
+    const a = card.querySelector('a[href*="watch?v="],a[href*="/shorts/"]');
+    const href = a ? a.getAttribute('href') : '';
+    const id = idFromHref(href);
+    const titleEl = card.querySelector('h3,h4,#video-title,.media-item-headline,[role="heading"],.yt-core-attributed-string');
+    const title = ((titleEl && titleEl.textContent) || (a && a.getAttribute('aria-label')) || '').trim();
+    const all = (card.innerText || card.textContent || '').trim();
+    const durMatch = all.match(/(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?)(?:\s|$)/);
+    const tag = card.tagName.toLowerCase();
+    return {
+      id, title, channel: '', description: all.slice(0, 400),
+      durationText: durMatch ? durMatch[1] : null,
+      isShort: /\/shorts\//.test(href) || /shorts|reel/.test(tag) || /#shorts?\b/i.test(title),
+      isLive: /\bLIVE\b/.test(all), kind: /radio/.test(tag) ? 'mix' : 'video',
+    };
+  }
+
+  function scanDom() {
+    if (!S.enabled || !document.body) return;
+    const ctx = pageContext();
+    document.documentElement.classList.toggle('mf-watch', ctx === 'watch');
+    const vid = currentVideoId();
+    const cards = document.querySelectorAll(CARD_SEL);
+    for (const card of cards) {
+      if (card.closest(PROTECTED_SEL)) continue;
+      if (card.parentElement && card.parentElement.closest(CARD_SEL)) continue; // nested; outer handles it
+      const meta = cardMeta(card);
+      if (!meta.id) continue;
+      let action;
+      if (ctx === 'watch' && S.hideRelated) {
+        action = meta.id === vid ? 'show' : 'hide';
+      } else {
+        // Prefer the richer metadata we saw in YouTube's JSON for this video.
+        const known = verdicts.get(meta.id);
+        const m = known ? known.meta : meta;
+        if (!m.title) continue;
+        action = evaluate(m, normalizeCtx(ctx)).action;
+        if (action === 'show' && S.showBadges && (ctx === 'home' || ctx === 'subscriptions')) addBadge(card, meta.id);
+      }
+      card.classList.toggle('mf-hidden', action !== 'show');
+    }
+  }
+  function normalizeCtx(c) { return c === 'watch' ? 'related' : c; }
+
+  const NEED_ICON = { relax: '🌿', laugh: '😄', curious: '🤔', learn: '📚', create: '🛠️', inspire: '🌱', comfort: '🫶' };
+  const LOAD_LABEL = ['easy', 'medium', 'demanding'];
+  function addBadge(card, id) {
+    if (card.querySelector(':scope > .mf-badge')) return;
+    const v = verdicts.get(id); if (!v) return;
+    const p = v.prof;
+    const icons = (p.needs || []).map(n => NEED_ICON[n]).filter(Boolean).slice(0, 3).join('');
+    const typeIcons = icons ? '' : (p.types || []).map(t => (C.TYPE_DEFS[t] || {}).emoji).filter(Boolean).slice(0, 2).join('');
+    const label = (icons ? icons + ' ' : typeIcons ? typeIcons + ' ' : '') + LOAD_LABEL[p.load] + (p.tone === 'light' ? ' · light' : '') + (p.source === 'ai' ? ' · ✦' : '');
+    const b = document.createElement('div');
+    b.className = 'mf-badge'; b.textContent = label + '  ·  👍👎';
+    b.title = (p.reasons || []).join('\n') + '\nTap to tell Mindful Feed whether this fits.';
+    b.setAttribute('role', 'button');
+    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openFeedback(v.meta); }, true);
+    card.appendChild(b);
+  }
+
+  function queueScan() {
+    if (scanQueued) return;
+    scanQueued = true;
+    setTimeout(() => { scanQueued = false; try { scanDom(); } catch (e) { console.warn('[MindfulFeed] scan', e); } maybeAutoFill(); }, 120);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Navigation & watch tracking
+  // ---------------------------------------------------------------------------
+  function onNavigate() {
+    if (location.href === lastHref && lastWatched) return;
+    lastHref = location.href;
+    document.documentElement.classList.toggle('mf-watch', pageContext() === 'watch');
+    if (location.pathname !== lastPath) {
+      // A different page starts with the "All" chip and a fresh count.
+      lastPath = location.pathname;
+      postsChip = false; pageShown.clear(); pageHeld.clear(); autoFillRounds = 0; enrichThisPage = 0; updateStat();
+    }
+    updatePostsClass();
+    updateWatchChip();
+    queueScan();
+    const vid = currentVideoId();
+    if (pageContext() === 'watch' && vid && vid !== lastWatched) {
+      lastWatched = vid;
+      setTimeout(() => recordWatch(vid), 2500);
+    }
+  }
+
+  function recordWatch(vid) {
+    if (currentVideoId() !== vid) return;
+    let v = verdicts.get(vid);
+    let prof = v && v.prof;
+    const onShelf = shelf.find(x => x.id === vid);
+    if (!prof) {
+      const title = (document.title || '').replace(/\s*-\s*YouTube\s*$/, '');
+      prof = C.classify({ id: vid, title });
+      if (onShelf) prof.informational = true;
+    }
+    refreshInfoWindow();
+    if (prof.informational && !infoState.ids.includes(vid)) {
+      infoState.count++; infoState.ids.push(vid);
+      if (infoState.ids.length > 50) infoState.ids = infoState.ids.slice(-50);
+    }
+    if (onShelf) { shelf = shelf.filter(x => x.id !== vid); shelfStats.watched++; }
+    persistSoon(); updateFabDot();
+    if (panelOpen) renderPanel();
+  }
+
+  ['pushState', 'replaceState'].forEach(fn => {
+    const orig = history[fn];
+    history[fn] = function () { const r = orig.apply(this, arguments); setTimeout(onNavigate, 0); return r; };
+  });
+  window.addEventListener('popstate', () => setTimeout(onNavigate, 0));
+  window.addEventListener('yt-navigate-finish', () => setTimeout(onNavigate, 0));
+  window.addEventListener('state-navigateend', () => setTimeout(onNavigate, 0));
+  setInterval(() => { if (location.href !== lastHref) onNavigate(); }, 1000);
+
+  // ---------------------------------------------------------------------------
+  // AI bridge (Android host). Results refine the heuristic labels.
+  // ---------------------------------------------------------------------------
+
+  function aiEnqueue(meta) {
+    if (!native || !S.aiEnabled) return;
+    if (aiQueue.some(m => m.id === meta.id) || aiPending.has(meta.id)) return;
+    aiQueue.push(meta);
+    clearTimeout(aiEnqueue.t);
+    aiEnqueue.t = setTimeout(aiFlush, 1200);
+  }
+  function aiFlush() {
+    if (!native || !aiQueue.length || aiInFlight >= 2) return;
+    const batch = aiQueue.splice(0, 20);
+    const reqId = 'r' + (aiReqSeq++);
+    for (const m of batch) aiPending.set(m.id, reqId);
+    aiInFlight++; aiStatus = 'classifying ' + batch.length + '…';
+    try {
+      native.postMessage(JSON.stringify({
+        type: 'classify', requestId: reqId, model: S.aiModel, needs: C.NEEDS, topics: C.TOPICS, types: C.TYPES,
+        feedback: Lr.examplesForAi(learner, 40),
+        items: batch.map(m => ({ id: m.id, title: m.title, channel: m.channel || '', duration: m.durationText || '', snippet: (m.description || '').slice(0, 200) })),
+      }));
+    } catch (e) { aiInFlight--; aiStatus = 'error: ' + e.message; }
+  }
+  function initNative() {
+    if (native || !window.MindfulNative) return;
+    native = window.MindfulNative;
+    aiStatus = 'idle';
+    native.onmessage = function (ev) {
+      let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'classifyResult') {
+        aiInFlight = Math.max(0, aiInFlight - 1);
+        for (const r of msg.results || []) {
+          if (!r || !r.id) continue;
+          aiCache[r.id] = r; aiPending.delete(r.id);
+          const v = verdicts.get(r.id);
+          profiles.delete(r.id);
+          if (v) evaluate(v.meta, v.context);
+        }
+        for (const [id, req] of aiPending) if (req === msg.requestId) aiPending.delete(id);
+        aiStatus = 'ok – ' + Object.keys(aiCache).length + ' videos classified';
+        persistSoon(); queueScan();
+        if (aiQueue.length) setTimeout(aiFlush, 300);
+      } else if (msg.type === 'error') {
+        aiInFlight = Math.max(0, aiInFlight - 1);
+        for (const [id, req] of aiPending) if (req === msg.requestId) aiPending.delete(id);
+        aiStatus = 'error: ' + msg.message;
+      } else if (msg.type === 'status') {
+        aiStatus = msg.hasKey ? (S.aiEnabled ? 'ready' : 'key saved – enable AI below') : 'no API key yet';
+      }
+      if (panelOpen && activeTab === 'ai') renderPanel();
+    };
+    try { native.postMessage(JSON.stringify({ type: 'status' })); } catch (e) { /* ignore */ }
+  }
+  initNative();
+
+  // ---------------------------------------------------------------------------
+  // UI (shadow DOM)
+  // ---------------------------------------------------------------------------
+  function h(tag, props) {
+    const el = document.createElement(tag);
+    if (props) for (const k of Object.keys(props)) {
+      const v = props[k];
+      if (v == null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else if (k === 'style') el.setAttribute('style', v);
+      else el.setAttribute(k, v === true ? '' : v);
+    }
+    for (let i = 2; i < arguments.length; i++) {
+      const c = arguments[i];
+      if (c == null || c === false) continue;
+      if (Array.isArray(c)) c.forEach(x => x != null && x !== false && el.appendChild(typeof x === 'string' ? document.createTextNode(x) : x));
+      else el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    }
+    return el;
+  }
+
+  const UI_CSS = `
+  :host{all:initial}
+  *{box-sizing:border-box}
+  .wrap{--bg:#fbfaf7;--fg:#22211f;--mut:#6b6862;--line:#e5e1d8;--acc:#3f7d6b;--acc2:#e7f1ed;--warn:#a5562f;
+    font:14px/1.45 system-ui,-apple-system,Roboto,"Segoe UI",sans-serif;color:var(--fg)}
+  @media (prefers-color-scheme:dark){.wrap{--bg:#1d1f1e;--fg:#ecebe7;--mut:#a5a39d;--line:#353836;--acc:#7cc2ab;--acc2:#24342f;--warn:#e19a76}}
+  .fab{position:fixed;right:14px;bottom:72px;z-index:2147483000;width:48px;height:48px;border-radius:50%;border:none;
+    background:var(--acc);color:#fff;font-size:22px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer}
+  .fab .dot{position:absolute;top:6px;right:6px;width:10px;height:10px;border-radius:50%;background:#f2c14e;border:2px solid var(--acc)}
+  .chip{position:fixed;right:70px;bottom:80px;z-index:2147483000;border:none;border-radius:999px;padding:8px 12px;
+    background:var(--bg);color:var(--fg);box-shadow:0 2px 10px rgba(0,0,0,.2);font:500 13px system-ui,sans-serif;cursor:pointer}
+  .chip.rate{bottom:128px}
+  .stat{position:fixed;right:14px;bottom:128px;z-index:2147483000;border:none;border-radius:999px;padding:5px 10px;
+    background:var(--bg);color:var(--fg);box-shadow:0 2px 8px rgba(0,0,0,.2);font:500 12px system-ui,sans-serif;cursor:pointer}
+  .progress{color:var(--mut);font-size:12.5px;margin:0 0 6px}
+  .choice{display:flex;flex-direction:column;gap:8px;margin:10px 0}
+  .choice .preset{width:100%}
+  .sheet{position:fixed;inset:auto 0 0 0;z-index:2147483001;max-height:88vh;overflow:auto;background:var(--bg);
+    border-radius:18px 18px 0 0;box-shadow:0 -8px 30px rgba(0,0,0,.3);padding:14px 16px 28px}
+  @media (min-width:700px){.sheet{left:auto;right:16px;bottom:16px;width:420px;border-radius:18px}}
+  .scrim{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.35)}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  h2{font-size:17px;margin:0}
+  h3{font-size:13px;margin:16px 0 6px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+  .x{border:none;background:transparent;font-size:22px;color:var(--mut);cursor:pointer}
+  .tabs{display:flex;gap:4px;overflow-x:auto;margin:4px -4px 10px;padding:0 4px}
+  .tab{border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:999px;padding:6px 12px;font:inherit;white-space:nowrap;cursor:pointer}
+  .tab.on{background:var(--acc);border-color:var(--acc);color:#fff}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+  .preset{border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:14px;padding:10px;text-align:left;font:inherit;cursor:pointer}
+  .preset.on{border-color:var(--acc);background:var(--acc2)}
+  .preset b{display:block;font-size:20px;margin-bottom:2px}
+  .preset small{display:block;color:var(--mut);font-size:11.5px;line-height:1.3}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+  .row label{flex:1}
+  .row small{display:block;color:var(--mut);font-size:12px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;flex-shrink:0}
+  .seg button{border:none;background:transparent;color:var(--fg);padding:5px 10px;font:inherit;font-size:12.5px;cursor:pointer}
+  .seg button.on{background:var(--acc);color:#fff}
+  select,input[type=number],input[type=text],textarea{font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:5px 8px}
+  textarea{width:100%;min-height:54px;resize:vertical}
+  input[type=checkbox]{width:20px;height:20px;accent-color:var(--acc)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .tchip{border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:999px;padding:4px 10px;font:inherit;font-size:12.5px;cursor:pointer}
+  .tchip.on{background:var(--acc2);border-color:var(--acc)}
+  .tchip.block{background:rgba(165,86,47,.12);border-color:var(--warn);text-decoration:line-through}
+  .card{border:1px solid var(--line);border-radius:14px;padding:10px;display:flex;gap:10px;align-items:flex-start;margin:8px 0}
+  .card img{width:120px;aspect-ratio:16/9;object-fit:cover;border-radius:8px;flex-shrink:0;background:var(--line)}
+  .card .t{font-weight:600;margin-bottom:2px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .card .m{color:var(--mut);font-size:12px}
+  .btns{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+  .btn{border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:999px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
+  .btn.p{background:var(--acc);border-color:var(--acc);color:#fff}
+  .note{color:var(--mut);font-size:12.5px;margin:6px 0}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--acc2);font-size:12px;margin:2px 4px 2px 0}
+  .log{font-size:12.5px;border-bottom:1px solid var(--line);padding:6px 0}
+  .log .r{color:var(--mut)}
+  .big{font-size:15px;margin:2px 0 10px}
+  `;
+
+
+  function mountUi() {
+    if (host || !document.body) return;
+    host = h('div', { id: 'mindful-feed-ui' });
+    shadow = host.attachShadow({ mode: 'open' });
+    shadow.appendChild(h('style', { text: UI_CSS }));
+    wrapEl = h('div', { class: 'wrap' });
+    shadow.appendChild(wrapEl);
+    fabEl = h('button', { class: 'fab', 'aria-label': 'Mindful Feed', title: 'Mindful Feed', onclick: () => { panelOpen ? closePanel() : openPanel('now'); } }, '🧭');
+    wrapEl.appendChild(fabEl);
+    chipEl = h('button', { class: 'chip', style: 'display:none', onclick: () => {
+      const vid = currentVideoId(); if (!vid) return;
+      const title = (document.title || '').replace(/\s*-\s*YouTube\s*$/, '');
+      const v = verdicts.get(vid);
+      saveToShelf(v ? v.meta : { id: vid, title, channel: '', kind: 'video' });
+      chipEl.textContent = '✓ On your shelf';
+    } }, '＋ Later shelf');
+    wrapEl.appendChild(chipEl);
+    rateChipEl = h('button', { class: 'chip rate', style: 'display:none', onclick: () => {
+      const vid = currentVideoId(); if (!vid) return;
+      const v = verdicts.get(vid);
+      openFeedback(v ? v.meta : { id: vid, title: (document.title || '').replace(/\s*-\s*YouTube\s*$/, ''), channel: '', kind: 'video' });
+    } }, '👍👎 Fits my mode?');
+    wrapEl.appendChild(rateChipEl);
+    statEl = h('button', { class: 'stat', style: 'display:none', title: 'Videos YouTube offered on this page', onclick: () => openPanel('log') });
+    wrapEl.appendChild(statEl);
+    document.body.appendChild(host);
+    updateFabDot(); updateWatchChip();
+  }
+
+  function updateWatchChip() {
+    if (!chipEl) return;
+    const vid = currentVideoId();
+    const show = pageContext() === 'watch' && S.shelfEnabled && !!vid;
+    chipEl.style.display = show ? '' : 'none';
+    if (rateChipEl) rateChipEl.style.display = pageContext() === 'watch' && vid ? '' : 'none';
+    if (show) chipEl.textContent = shelf.some(x => x.id === vid) ? '✓ On your shelf' : '＋ Later shelf';
+  }
+
+  function updateStat() {
+    if (!statEl) return;
+    const c = pageContext();
+    const show = (c === 'home' || c === 'subscriptions') && S.enabled && (pageShown.size + pageHeld.size) > 0;
+    statEl.style.display = show ? '' : 'none';
+    if (show) statEl.textContent = '▶ ' + pageShown.size + ' shown · ' + pageHeld.size + ' held back';
+  }
+
+  function updateFabDot() {
+    if (!fabEl) return;
+    const old = fabEl.querySelector('.dot'); if (old) old.remove();
+    const budgetLeft = (S.infoBudget || 0) - infoUsed();
+    const wantsInfo = ['any', 'curious', 'learn', 'create'].includes(S.need);
+    if (shelf.length && budgetLeft > 0 && wantsInfo) fabEl.appendChild(h('span', { class: 'dot', title: 'Something from your shelf fits right now' }));
+  }
+
+  function openPanel(tab) { panelOpen = true; activeTab = tab || activeTab; renderPanel(); }
+  function closePanel() { panelOpen = false; checkInOpen = false; checkInAsk = null; fb = null; renderPanel(); if (dirty) reloadIfFeed(); }
+
+  function renderPanel() {
+    if (!wrapEl) return;
+    for (const el of Array.from(wrapEl.querySelectorAll('.sheet,.scrim'))) el.remove();
+    if (!panelOpen && !checkInOpen && !fb) return;
+    wrapEl.appendChild(h('div', { class: 'scrim', onclick: closePanel }));
+    const sheet = h('div', { class: 'sheet', role: 'dialog', 'aria-label': 'Mindful Feed' });
+    if (checkInOpen) { renderCheckIn(sheet); wrapEl.appendChild(sheet); return; }
+    if (fb) { renderFeedback(sheet); wrapEl.appendChild(sheet); return; }
+    sheet.appendChild(h('div', { class: 'top' },
+      h('h2', { text: '🧭 Mindful Feed' }),
+      h('div', null,
+        h('button', { class: 'btn', onclick: () => { S.enabled = !S.enabled; saveSettings(); reloadIfFeed(true); renderPanel(); } }, S.enabled ? 'Pause' : 'Resume'),
+        h('button', { class: 'x', 'aria-label': 'Close', onclick: closePanel }, '×'))));
+    const tabs = [['now', 'Right now'], ['teach', '🎓 Teach'], ['shelf', 'Shelf (' + shelf.length + ')'], ['filters', 'Filters'], ['log', 'Filtered'], ['ai', 'AI']];
+    sheet.appendChild(h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (activeTab === k ? ' on' : ''), onclick: () => { activeTab = k; renderPanel(); } }, l))));
+    const body = h('div');
+    ({ now: renderNow, teach: renderTeach, shelf: renderShelf, filters: renderFilters, log: renderLog, ai: renderAi })[activeTab](body);
+    sheet.appendChild(body);
+    wrapEl.appendChild(sheet);
+  }
+
+  function presetGrid(onPick) {
+    const all = allMoods();
+    return h('div', { class: 'grid' }, Object.keys(all).map(k => {
+      const pr = all[k];
+      return h('button', { class: 'preset' + (currentPreset === k ? ' on' : ''), onclick: () => onPick(k) },
+        h('b', { text: pr.emoji }), pr.label, h('small', { text: pr.hint }));
+    }));
+  }
+
+  function applyPreset(k) {
+    const base = { includeNoMood: false };
+    if (profile && profile.answers && profile.answers.companyFeel) base.blockParasocial = true;
+    Object.assign(S, base, allMoods()[k].set, (profile && profile.overrides && profile.overrides[k]) || {});
+    currentPreset = k; store.set('preset', k);
+    lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn);
+    saveSettings();
+  }
+
+  function finishCheckIn() { checkInOpen = false; checkInAsk = null; panelOpen = false; renderPanel(); reloadIfFeed(true); }
+
+  function askChoices(presetKey, onPick) {
+    const ask = allMoods()[presetKey].ask;
+    return h('div', { class: 'choice' }, ask.options.map(o =>
+      h('button', { class: 'preset', onclick: () => { Object.assign(S, o.set); saveSettings(); onPick(); } }, o.label, h('small', { text: o.hint }))));
+  }
+
+  function renderCheckIn(sheet) {
+    if (checkInAsk) {
+      const pr = allMoods()[checkInAsk];
+      sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: pr.emoji + ' ' + pr.ask.question }),
+        h('button', { class: 'x', 'aria-label': 'Back', onclick: () => { checkInAsk = null; renderPanel(); } }, '‹')));
+      sheet.appendChild(askChoices(checkInAsk, finishCheckIn));
+      return;
+    }
+    sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: 'How are you right now?' }),
+      h('button', { class: 'x', 'aria-label': 'Close', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); closePanel(); } }, '×')));
+    sheet.appendChild(h('p', { class: 'note', text: 'Your feed will only show what fits. Nothing informational gets lost – it waits on your Later shelf.' }));
+    if (!profile) sheet.appendChild(h('div', { class: 'card', style: 'flex-direction:column;align-items:stretch' },
+      h('div', { class: 't', text: 'New here? Tell Mindful Feed what each mood means to you.' }),
+      h('div', { class: 'm', text: 'About 5 minutes (most answers are pre-filled) – it makes the filter much more accurate. You can also just pick a mood below.' }),
+      h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); checkInOpen = false; openQuiz(null); } }, 'Start setup'))));
+    sheet.appendChild(presetGrid(k => {
+      applyPreset(k);
+      if (allMoods()[k].ask) { checkInAsk = k; renderPanel(); return; }
+      finishCheckIn();
+    }));
+    sheet.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); checkInOpen = false; openPanel('now'); } }, 'Fine-tune instead')));
+  }
+
+  function seg(options, value, onChange) {
+    return h('div', { class: 'seg' }, options.map(([v, l]) => h('button', { class: value === v ? 'on' : '', onclick: () => onChange(v) }, l)));
+  }
+  function row(label, hint, control) {
+    return h('div', { class: 'row' }, h('label', null, label, hint ? h('small', { text: hint }) : null), control);
+  }
+  function check(key, after) {
+    const c = h('input', { type: 'checkbox' });
+    c.checked = !!S[key];
+    c.addEventListener('change', () => { S[key] = c.checked; saveSettings(); applyCss(); if (after) after(); queueScan(); });
+    return c;
+  }
+  function setAndRefresh(key, v) { S[key] = v; currentPreset = null; store.set('preset', null); saveSettings(); renderPanel(); markDirty(); }
+
+  // Settings changes are applied when the panel closes: feeds are reloaded so
+  // YouTube's response is filtered again with the new settings.
+  function markDirty() { dirty = true; }
+  function reloadIfFeed(force) {
+    const c = pageContext();
+    const wasDirty = dirty; dirty = false;
+    if ((force || wasDirty) && (c === 'home' || c === 'subscriptions')) location.reload();
+    else queueScan();
+  }
+
+  function renderNow(b) {
+    const budgetLeft = Math.max(0, (S.infoBudget || 0) - infoUsed());
+    const cur = currentPreset && allMoods()[currentPreset];
+    b.appendChild(h('p', { class: 'big' }, cur ? cur.emoji + ' ' + cur.label : 'Custom mix'));
+    b.appendChild(presetGrid(k => { applyPreset(k); renderPanel(); markDirty(); }));
+    const mp = currentMoodProfile();
+    if (cur) {
+      const tl = ts => (ts || []).map(t => (C.TYPE_DEFS[t] || {}).emoji + ' ' + ((C.TYPE_DEFS[t] || {}).label || t)).join(', ');
+      b.appendChild(h('p', { class: 'note', text: mp
+        ? 'Shows: ' + (tl(mp.like) || 'whatever fits') + (mp.avoid && mp.avoid.length ? ' · Keeps away: ' + tl(mp.avoid) : '') + (mp.maxMinutes ? ' · up to ' + mp.maxMinutes + ' min' : '')
+        : 'Shows whatever fits the settings below.' }));
+    }
+    b.appendChild(h('div', { class: 'btns' },
+      cur ? h('button', { class: 'btn', onclick: () => openQuiz(currentPreset) }, '✎ Adjust what this mood shows') : null,
+      h('button', { class: 'btn', onclick: () => openEditor(null, 'now') }, '＋ New mood'),
+      cur && cur.custom ? h('button', { class: 'btn', onclick: () => openEditor(cur, 'now') }, '✎ Edit this mood') : null));
+    if (cur && cur.ask) {
+      b.appendChild(h('h3', { text: cur.ask.question }));
+      b.appendChild(askChoices(currentPreset, () => { renderPanel(); markDirty(); }));
+    }
+    b.appendChild(h('h3', { text: 'Fine-tune' }));
+    const needSel = h('select', { onchange: e => setAndRefresh('need', e.target.value) },
+      Object.keys(P.NEED_LABELS).map(k => { const o = h('option', { value: k }, P.NEED_LABELS[k]); if (S.need === k) o.selected = true; return o; }));
+    b.appendChild(row('What do you need?', 'Psychological need the feed should serve', needSel));
+    const loads = P.loadsOf(S);
+    b.appendChild(row('Show videos that are', 'Pick one or more – e.g. Focused hides easy videos',
+      h('div', { class: 'seg' }, [[0, 'Easy'], [1, 'Medium'], [2, 'Demanding']].map(([v, l]) => h('button', { class: loads.includes(v) ? 'on' : '', onclick: () => {
+        const set = new Set(loads); set.has(v) ? set.delete(v) : set.add(v);
+        if (set.size) setAndRefresh('loads', Array.from(set).sort());
+      } }, l)))));
+    b.appendChild(row('Tone', null, seg([['light', 'Light-hearted'], ['balanced', 'Balanced'], ['any', 'Anything']], S.tone, v => setAndRefresh('tone', v))));
+    b.appendChild(row('Politics', null, seg([['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']], S.politics, v => setAndRefresh('politics', v))));
+    b.appendChild(row('News', null, seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.news, v => setAndRefresh('news', v))));
+    b.appendChild(row('Music', null, seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.music, v => setAndRefresh('music', v))));
+    b.appendChild(row('Emotional', 'Emotionally heavy, or dwelling in a feeling', seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.emotional, v => setAndRefresh('emotional', v))));
+    b.appendChild(row('Distressing topics', 'Crime, war, disasters, horror', seg([['hide', 'Hide'], ['show', 'Allow']], S.distressing, v => setAndRefresh('distressing', v))));
+    b.appendChild(row('Also show "fits no mood" videos', 'Videos you sorted into the "fits no mood" pile (' + Lr.noMoodVideos(learner).length + ')', check('includeNoMood', markDirty)));
+    b.appendChild(row('Only clear matches', 'Hide videos that don\'t clearly fit the mode (also ones we can\'t classify)', check('strictNeed', markDirty)));
+    b.appendChild(h('h3', { text: 'Informational videos' }));
+    b.appendChild(h('p', { class: 'note' }, 'Today: ' + infoUsed() + ' of ' + S.infoBudget + ' watched. ' +
+      (budgetLeft > 0 ? 'You have room for ' + budgetLeft + ' more.' : "That's enough input for now – new ones wait on your shelf.")));
+    const next = P.shelfNext(shelf, S);
+    if (next && budgetLeft > 0) { b.appendChild(h('p', { class: 'note', text: 'Next up from your shelf:' })); b.appendChild(shelfCard(next, true)); }
+    b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { markDirty(); closePanel(); } }, 'Apply to feed')));
+  }
+
+  function shelfCard(x, primary) {
+    return h('div', { class: 'card' },
+      h('img', { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(x.id) + '/mqdefault.jpg', alt: '', loading: 'lazy', onerror: e => { e.target.style.visibility = 'hidden'; } }),
+      h('div', null,
+        h('div', { class: 't', text: x.title || x.id }),
+        h('div', { class: 'm', text: [x.channel, x.durationText, x.source === 'saved' ? 'saved by you' : 'caught for you', ago(x.addedAt)].filter(Boolean).join(' · ') }),
+        h('div', { class: 'btns' },
+          h('button', { class: 'btn' + (primary ? ' p' : ''), onclick: () => { closePanel(); location.href = '/watch?v=' + encodeURIComponent(x.id); } }, 'Watch'),
+          h('button', { class: 'btn', onclick: () => { letGo(x.id); renderPanel(); } }, 'Let go'))));
+  }
+  function ago(t) {
+    if (!t) return '';
+    const d = Math.floor((Date.now() - t) / 86400000);
+    return d <= 0 ? 'today' : d === 1 ? 'yesterday' : d + ' days ago';
+  }
+
+  function renderShelf(b) {
+    expireShelf();
+    b.appendChild(h('p', { class: 'note' },
+      'A small shelf, not a pile. It holds at most ' + S.shelfMax + ' videos; things you didn\'t save yourself are let go after ' +
+      S.shelfAutoExpireDays + ' days, saved ones after ' + S.shelfExpireDays + '. If a topic really matters, it will come around again.'));
+    if (!shelf.length) { b.appendChild(h('p', { class: 'big', text: 'Your shelf is empty. Nothing is waiting for you. 🌿' })); }
+    else {
+      const next = P.shelfNext(shelf, S);
+      const budgetLeft = Math.max(0, (S.infoBudget || 0) - infoUsed());
+      b.appendChild(h('h3', { text: !next ? 'Waiting for a day with more capacity' : budgetLeft > 0 ? 'One thing, when you are ready' : 'Waiting quietly (you\'ve had enough input today)' }));
+      if (next) b.appendChild(shelfCard(next, budgetLeft > 0));
+      else b.appendChild(h('p', { class: 'note', text: 'Nothing here fits your current capacity – and that is fine. It will wait.' }));
+      const rest = shelf.filter(x => !next || x.id !== next.id);
+      if (rest.length) {
+        const det = h('details', null, h('summary', { text: rest.length + (next ? ' more' : '') + ' on the shelf' }));
+        rest.sort((a, c) => c.addedAt - a.addedAt).forEach(x => det.appendChild(shelfCard(x, false)));
+        b.appendChild(det);
+      }
+      b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => { for (const x of shelf) { letGoIds[x.id] = Date.now(); shelfStats.letGo++; } shelf = []; persistSoon(); updateFabDot(); renderPanel(); } }, 'Let everything go')));
+    }
+    b.appendChild(h('p', { class: 'note', text: 'Since you started: ' + shelfStats.watched + ' watched from the shelf, ' + shelfStats.letGo + ' gracefully let go.' }));
+  }
+
+  function topicChips(onlyMode) {
+    const key = onlyMode ? 'topicsOnly' : 'topicsBlocked';
+    return h('div', { class: 'chips' }, C.TOPICS.map(t => {
+      const on = (S[key] || []).includes(t);
+      return h('button', { class: 'tchip' + (on ? (onlyMode ? ' on' : ' block') : ''), onclick: () => {
+        const list = new Set(S[key] || []); on ? list.delete(t) : list.add(t); S[key] = Array.from(list); saveSettings(); markDirty(); renderPanel();
+      } }, t);
+    }));
+  }
+  function listArea(key, placeholder) {
+    const ta = h('textarea', { placeholder });
+    ta.value = (S[key] || []).join(', ');
+    ta.addEventListener('change', () => { S[key] = ta.value.split(/[,\n]/).map(s => s.trim()).filter(Boolean); saveSettings(); markDirty(); });
+    return ta;
+  }
+  function num(key, min, max) {
+    const i = h('input', { type: 'number', min: String(min), max: String(max), style: 'width:64px' });
+    i.value = S[key];
+    i.addEventListener('change', () => { const v = Math.max(min, Math.min(max, Number(i.value) || 0)); S[key] = v; saveSettings(); updateFabDot(); });
+    return i;
+  }
+
+  function renderFilters(b) {
+    b.appendChild(h('h3', { text: 'Protections' }));
+    b.appendChild(row('Block parasocial videos', 'Vlogs, drama, reactions, “we need to talk”, streams', check('blockParasocial', markDirty)));
+    b.appendChild(row('Block addictive patterns', 'Clickbait, rage bait, challenges, pranks', check('blockAddictive', markDirty)));
+    b.appendChild(row('Hide Shorts', 'Feed shelves and the Shorts tab', check('hideShorts', markDirty)));
+    b.appendChild(row('Look up details for unclear videos', 'Asks YouTube for a video\'s category and tags (one small request each, only when unsure, remembered). Status: ' + enrichStatus, check('enrich', markDirty)));
+    b.appendChild(row('Keep loading while the feed is nearly empty', 'Fetches more recommendations from YouTube in the background', check('autoFill')));
+    b.appendChild(row('Hide community posts', 'Except when you pick the "Posts" chip above the feed, or on a channel\'s page', check('hidePosts', () => { updatePostsClass(); markDirty(); })));
+    b.appendChild(row('Hide ad cards in feeds', 'Player ads are not touched', check('hideAds', markDirty)));
+    b.appendChild(h('h3', { text: 'While watching' }));
+    b.appendChild(row('No recommendations under videos', 'Also removes suggestions next to comments', check('hideRelated')));
+    b.appendChild(row('No end screens / info cards', null, check('hideEndscreens')));
+    b.appendChild(row('No autoplay of the next video', null, check('disableAutoplay')));
+    b.appendChild(row('Hide comments completely', null, check('hideCommentsCompletely')));
+    b.appendChild(h('h3', { text: 'Only these topics' }));
+    b.appendChild(h('p', { class: 'note', text: 'Leave empty for all topics.' }));
+    b.appendChild(topicChips(true));
+    b.appendChild(h('h3', { text: 'Never these topics' }));
+    b.appendChild(topicChips(false));
+    b.appendChild(h('h3', { text: 'Keywords to block' }));
+    b.appendChild(listArea('keywordsBlocked', 'e.g. elden ring spoilers, crypto'));
+    b.appendChild(h('h3', { text: 'Blocked channels' }));
+    b.appendChild(listArea('channelsBlocked', 'Exact channel names, comma separated'));
+    b.appendChild(h('h3', { text: 'Trusted channels (always shown)' }));
+    b.appendChild(listArea('channelsTrusted', 'Exact channel names, comma separated'));
+    b.appendChild(h('h3', { text: 'Capacity & shelf' }));
+    b.appendChild(row('Informational videos per window', null, num('infoBudget', 0, 10)));
+    b.appendChild(row('Budget window', null, seg([['day', 'Per day'], ['session', 'Per session']], S.infoBudgetWindow, v => { S.infoBudgetWindow = v; saveSettings(); renderPanel(); })));
+    b.appendChild(row('Catch informational videos for later', 'Instead of just hiding them', check('shelfAutoCatch')));
+    b.appendChild(row('Shelf size', null, num('shelfMax', 1, 20)));
+    b.appendChild(row('Auto-caught: let go after (days)', null, num('shelfAutoExpireDays', 1, 30)));
+    b.appendChild(row('Saved: let go after (days)', null, num('shelfExpireDays', 1, 90)));
+    b.appendChild(h('h3', { text: 'Other' }));
+    b.appendChild(row('Also filter search results', 'Off: searches show what you asked for', check('filterSearch')));
+    b.appendChild(row('Show labels on videos', 'Need · load · tone', check('showBadges')));
+    b.appendChild(row('Ask how I am every … hours', null, num('checkInEveryHours', 0, 48)));
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn p', onclick: () => { markDirty(); closePanel(); } }, 'Apply to feed'),
+      h('button', { class: 'btn', onclick: () => { if (confirm('Reset all Mindful Feed settings?')) { S = P.merge(null); saveSettings(); applyCss(); renderPanel(); } } }, 'Reset settings')));
+  }
+
+  function renderLog(b) {
+    const items = filterLog.slice(-100).reverse();
+    b.appendChild(h('p', { class: 'note', text: 'What the algorithm wanted to show you, and why it didn\'t reach you. Tap to watch anyway.' }));
+    if (!items.length) b.appendChild(h('p', { text: 'Nothing filtered yet.' }));
+    for (const x of items) {
+      b.appendChild(h('div', { class: 'log' },
+        h('a', { href: '/watch?v=' + encodeURIComponent(x.id), style: 'color:inherit' }, x.title || x.id),
+        h('div', { class: 'r', text: (x.channel ? x.channel + ' · ' : '') + (x.action === 'shelf' ? '📥 ' : '🚫 ') + x.reason }),
+        h('div', { class: 'chips', style: 'margin-top:4px' },
+          h('button', { class: 'tchip', onclick: () => { submitFeedback(x, true, [], false); x.reason = '👍 you said it fits – shown after reload'; renderPanel(); } }, '👍 Should be shown'),
+          x.channel ? h('button', { class: 'tchip', onclick: () => { S.channelsTrusted = Array.from(new Set((S.channelsTrusted || []).concat([x.channel]))); saveSettings(); markDirty(); renderPanel(); } }, 'Trust channel') : null)));
+    }
+    if (items.length) b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => { filterLog = []; persistSoon(); renderPanel(); } }, 'Clear log')));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Feedback & training (works offline; with an API key it also guides Claude)
+  // ---------------------------------------------------------------------------
+  function describe(meta) {
+    const learned = Lr.judge(learner, meta, modeKey());
+    const p = Lr.adjustProfile(profileFor(meta), learned);
+    const needs = (p.needs || []).map(n => (NEED_ICON[n] || '') + ' ' + n).join(', ');
+    return [needs || 'no clear need', LOAD_LABEL[p.load], p.tone, p.political ? 'political' : null].filter(Boolean).join(' · ');
+  }
+  function currentDecision(meta) {
+    const v = verdicts.get(meta.id);
+    const d = v ? decisionFor(v.meta, v.context).d : decisionFor(meta, 'home').d;
+    return d.action === 'show' ? 'shown' : (d.action === 'shelf' ? 'on your shelf' : 'hidden') + ' – ' + d.reason;
+  }
+  function videoCard(meta, lines) {
+    return h('div', { class: 'card' },
+      h('img', { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(meta.id) + '/mqdefault.jpg', alt: '', loading: 'lazy', onerror: e => { e.target.style.visibility = 'hidden'; } }),
+      h('div', null,
+        h('div', { class: 't', text: meta.title || meta.id }),
+        (lines || []).filter(Boolean).map(t => h('div', { class: 'm', text: t }))));
+  }
+
+  function openFeedback(meta) {
+    if (!meta || !meta.id) return;
+    fb = { meta, step: 'ask', reasons: new Set(), blockChannel: false };
+    renderPanel();
+  }
+
+  function submitFeedback(meta, fits, reasons, blockChannel) {
+    Lr.feedback(learner, meta, modeKey(), fits, reasons, modeLabel());
+    if (blockChannel && meta.channel) {
+      S.channelsBlocked = Array.from(new Set((S.channelsBlocked || []).concat([meta.channel])));
+      saveSettings();
+    }
+    saveLearner();
+    // "Doesn't fit" is applied to the page right away; "fits" may need the
+    // feed to be fetched again (the video may already have been removed).
+    if (fits) markDirty();
+    queueScan();
+  }
+
+  function reasonChips(state) {
+    return h('div', { class: 'chips' }, Object.keys(Lr.REASONS).map(k =>
+      h('button', { class: 'tchip' + (state.reasons.has(k) ? ' on' : ''), onclick: () => { state.reasons.has(k) ? state.reasons.delete(k) : state.reasons.add(k); renderPanel(); } }, Lr.REASONS[k].label)));
+  }
+
+  function renderFeedback(sheet) {
+    const m = fb.meta;
+    sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: 'Does this fit right now?' }),
+      h('button', { class: 'x', 'aria-label': 'Close', onclick: () => { fb = null; renderPanel(); if (dirty) reloadIfFeed(); } }, '×')));
+    sheet.appendChild(h('p', { class: 'note', text: 'Mode: ' + modeLabel() }));
+    sheet.appendChild(videoCard(m, [m.channel, 'Labels: ' + describe(m), 'Currently ' + currentDecision(m)]));
+    if (fb.step === 'ask') {
+      sheet.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { submitFeedback(m, true, [], false); fb.step = 'done'; fb.fits = true; renderPanel(); } }, '✅ Fits this mode'),
+        h('button', { class: 'btn', onclick: () => { fb.step = 'why'; renderPanel(); } }, "❌ Doesn't fit")));
+      sheet.appendChild(h('p', { class: 'note', text: 'Your answer is learned on this device. Similar videos (shared words or the same channel) will follow it – no API key needed.' }));
+    } else if (fb.step === 'why') {
+      sheet.appendChild(h('h3', { text: 'Why not? (optional – helps it learn faster)' }));
+      sheet.appendChild(reasonChips(fb));
+      if (m.channel) {
+        const c = h('input', { type: 'checkbox' }); c.checked = fb.blockChannel;
+        c.addEventListener('change', () => { fb.blockChannel = c.checked; });
+        sheet.appendChild(row('Never show ' + m.channel, null, c));
+      }
+      sheet.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => {
+        submitFeedback(m, false, Array.from(fb.reasons), fb.blockChannel); fb.step = 'done'; fb.fits = false; renderPanel();
+      } }, 'Save')));
+    } else {
+      sheet.appendChild(h('p', { class: 'big', text: fb.fits ? '✓ Got it – videos like this fit "' + modeLabel() + '".' : '✓ Got it – videos like this stay out of "' + modeLabel() + '".' }));
+      sheet.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { fb = null; renderPanel(); if (dirty) reloadIfFeed(); } }, 'Done'),
+        h('button', { class: 'btn', onclick: () => { fb = null; teach = null; openPanel('teach'); } }, '🎓 Teach more')));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Loading more recommendations from YouTube (scrolls YouTube's own feed so
+  // it fetches its next page; everything new runs through the filter too)
+  // ---------------------------------------------------------------------------
+  function canLoadMore() { const c = pageContext(); return c === 'home' || c === 'subscriptions'; }
+
+  function loadMore(rounds, done) {
+    if (!canLoadMore() || (loadState && loadState.running)) { if (done) done(-1); return; }
+    const before = verdicts.size, y = window.scrollY, started = Date.now();
+    let i = 0;
+    loadState = { running: true, added: 0 };
+    const step = () => {
+      const el = document.scrollingElement || document.documentElement;
+      window.scrollTo(0, el.scrollHeight);
+      window.dispatchEvent(new Event('scroll'));
+      setTimeout(() => {
+        i++;
+        loadState.added = verdicts.size - before;
+        if (panelOpen && activeTab === 'teach') renderPanel(); // live "+N" while loading
+        if (i < rounds) return step();
+        if (lastUserInput < started) window.scrollTo(0, y); // don't yank the page if you were using it
+        loadState = { running: false, added: verdicts.size - before };
+        if (done) done(loadState.added);
+        if (panelOpen && activeTab === 'teach') renderPanel();
+      }, 1400);
+    };
+    step();
+  }
+
+  /** While the feed shows almost nothing, quietly ask YouTube for more (a few rounds per page). */
+  function maybeAutoFill() {
+    clearTimeout(autoFillTimer);
+    if (!S.autoFill || !S.enabled || !canLoadMore() || panelOpen || fb || checkInOpen) return;
+    if (pageShown.size >= 6 || autoFillRounds >= 6) return;
+    autoFillTimer = setTimeout(() => {
+      if (pageShown.size >= 6 || panelOpen || fb || (loadState && loadState.running)) return;
+      if (Date.now() - lastUserInput < 4000) return maybeAutoFill(); // wait until you pause
+      autoFillRounds++;
+      loadMore(1, () => maybeAutoFill());
+    }, 1800);
+  }
+
+  function loadMoreButton(after) {
+    if (!canLoadMore()) return h('p', { class: 'note', text: 'To load more videos, open your Home feed first.' });
+    if (loadState && loadState.running) return h('p', { class: 'note', text: '⏳ Loading more from YouTube… (+' + loadState.added + ')' });
+    return h('div', null,
+      loadState && loadState.added >= 0 ? h('p', { class: 'note', text: loadState.added ? '+' + loadState.added + ' new videos from YouTube.' : 'YouTube didn\'t send anything new this time – try again in a moment.' }) : null,
+      h('button', { class: 'btn', onclick: () => { loadMore(3, () => { if (after) after(); renderPanel(); }); renderPanel(); } }, '⤓ Load more videos from YouTube'));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Teach: quick check (current mood) · sort my feed (all moods) · mood editor
+  // ---------------------------------------------------------------------------
+  /** Every video YouTube offered on this page, in feed order (shown and held back). */
+  /** A Short – by renderer, link, "#shorts" in the title, or (older log entries) by the reason it was hidden. */
+  function looksShort(m) { return !!(m.isShort || /#shorts?\b/i.test(m.title || '') || /^Short\b/.test(m.reason || '')); }
+
+  function candidates() {
+    const out = [], seen = new Set();
+    // With Shorts turned off, they don't show up for teaching either.
+    const skipShorts = !!S.hideShorts;
+    for (const v of verdicts.values()) {
+      const m = v.meta;
+      if (!m || !m.id || !m.title || m.kind !== 'video' || seen.has(m.id) || (skipShorts && looksShort(m))) continue;
+      seen.add(m.id); out.push(Object.assign({ _ctx: v.context }, m));
+    }
+    for (const x of filterLog.slice().reverse()) {
+      if (!x.id || !x.title || seen.has(x.id) || (skipShorts && looksShort(x))) continue;
+      seen.add(x.id); out.push(Object.assign({ kind: 'video', _ctx: 'home' }, x));
+    }
+    return out;
+  }
+
+  function buildQuickQueue(asked, limit) {
+    const mode = modeKey();
+    const shown = [], hidden = [];
+    for (const m of candidates()) {
+      if (asked.has(m.id) || (learner.videos[m.id] || {})[mode] !== undefined || (learner.videos[m.id] || {}).never) continue;
+      (decisionFor(m, m._ctx).d.action === 'show' ? shown : hidden).push(m);
+    }
+    // Alternate: what you see (are these right?) and what was held back (should any be shown?).
+    const q = [];
+    while (q.length < limit && (shown.length || hidden.length)) {
+      if (shown.length) q.push(shown.shift());
+      if (hidden.length && q.length < limit) q.push(hidden.shift());
+    }
+    return q;
+  }
+
+  function sortQueue(t) { return candidates().filter(m => !Lr.isSorted(learner, m.id) && !t.skipped.has(m.id)); }
+
+  function renderTeach(b) {
+    const t = teach || (teach = { view: 'home' });
+    ({ home: teachHome, quick: teachQuick, sort: teachSort, editor: teachEditor, quiz: teachQuiz })[t.view](b, t);
+  }
+
+  function teachHome(b, t) {
+    if (t && t.saved) b.appendChild(h('p', { class: 'note', text: '✓ Saved. Your moods now follow your answers – close this panel to refresh the feed.' }));
+    b.appendChild(h('p', { class: 'big', text: 'Teach Mindful Feed what fits you' }));
+    b.appendChild(h('p', { class: 'note', text: 'Everything is learned on this device – no API key needed. Similar videos (shared words or the same channel) follow your answers. With an API key, your answers also guide Claude.' }));
+    b.appendChild(h('div', { class: 'choice' },
+      h('button', { class: 'preset', onclick: () => openQuiz(null) },
+        (profile ? '🧭 Redo the setup questions' : '🧭 Setup questions – what each mood means to you'), h('small', { text: 'About 5 minutes – most answers are pre-filled, just adjust. What feels easy or demanding to you, what helps in each mood, what to keep away.' })),
+      h('button', { class: 'preset', onclick: () => { teach = { view: 'quick', asked: new Set(), queue: [], i: 0, step: 'ask', reasons: new Set(), answered: 0 }; teach.queue = buildQuickQueue(teach.asked, 10); renderPanel(); } },
+        '✅ Quick check – ' + modeLabel(), h('small', { text: 'Yes / no for your current mood, 10 videos at a time.' })),
+      h('button', { class: 'preset', onclick: () => { teach = { view: 'sort', skipped: new Set(), selected: new Set(), step: 'pick', sorted: 0, blockChannel: false }; renderPanel(); } },
+        '🗂️ Sort my feed', h('small', { text: 'Every video YouTube offered: pick all moods it fits, "fits no mood", or "never show".' })),
+      h('button', { class: 'preset', onclick: () => openEditor(null, 'home') },
+        '＋ Create a mood', h('small', { text: 'Name it, set the basics, and fill it with videos from your "fits no mood" pile.' }))));
+    const pile = Lr.noMoodVideos(learner);
+    b.appendChild(h('p', { class: 'note', text: '"Fits no mood" pile: ' + pile.length + ' videos.' + (customMoods.length ? ' Your moods: ' + customMoods.map(m => m.emoji + ' ' + m.label).join(', ') + '.' : '') }));
+    if (customMoods.length) b.appendChild(h('div', { class: 'chips' }, customMoods.map(m => h('button', { class: 'tchip', onclick: () => openEditor(m, 'home') }, '✎ ' + m.emoji + ' ' + m.label))));
+    const det = h('details', null, h('summary', { text: 'What I\'ve learned (' + learner.count + ' answers)' }));
+    const top = Lr.top(learner.modes[modeKey()], 10);
+    if (top.length) {
+      det.appendChild(h('p', { class: 'note', text: 'For ' + modeLabel() + ':' }));
+      det.appendChild(h('div', { class: 'chips' }, top.map(x => h('span', { class: 'pill', text: (x.weight > 0 ? '👍 ' : '👎 ') + x.feature }))));
+    }
+    for (const dim of Object.keys(learner.dims)) {
+      const tops = Lr.top(learner.dims[dim], 6).filter(x => x.weight > 0);
+      if (!tops.length) continue;
+      det.appendChild(h('p', { class: 'note', text: 'Feels ' + dim + ' to you:' }));
+      det.appendChild(h('div', { class: 'chips' }, tops.map(x => h('span', { class: 'pill', text: x.feature }))));
+    }
+    if (learner.count) det.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => {
+      if (confirm('Forget everything Mindful Feed has learned from your answers (including "never show" and the "fits no mood" pile)?')) { learner = Lr.empty(); saveLearner(); markDirty(); renderPanel(); }
+    } }, 'Reset what I learned')));
+    b.appendChild(det);
+  }
+
+  function backHome(t) { return h('button', { class: 'btn', onclick: () => { teach = { view: 'home' }; renderPanel(); } }, '‹ Back'); }
+
+  function teachQuick(b, t) {
+    if (t.i >= t.queue.length) {
+      b.appendChild(h('p', { class: 'big', text: t.answered ? '✓ ' + t.answered + ' answers learned.' : 'Nothing new to check right now.' }));
+      const more = () => { t.queue = buildQuickQueue(t.asked, 10); t.i = 0; };
+      const avail = buildQuickQueue(t.asked, 10).length;
+      b.appendChild(h('div', { class: 'btns' },
+        avail ? h('button', { class: 'btn p', onclick: () => { more(); renderPanel(); } }, 'Next ' + avail + ' videos') : null,
+        h('button', { class: avail ? 'btn' : 'btn p', onclick: () => { teach = null; markDirty(); closePanel(); } }, 'Apply to feed'),
+        backHome(t)));
+      b.appendChild(loadMoreButton(() => { if (t.i >= t.queue.length) more(); }));
+      return;
+    }
+    const m = t.queue[t.i];
+    const next = () => { t.asked.add(m.id); t.i++; t.step = 'ask'; t.reasons = new Set(); renderPanel(); };
+    b.appendChild(h('p', { class: 'progress', text: (t.i + 1) + ' / ' + t.queue.length + ' · mood: ' + modeLabel() }));
+    b.appendChild(videoCard(m, [m.channel, 'Labels: ' + describe(m), 'Currently ' + currentDecision(m)]));
+    if (t.step === 'ask') {
+      b.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { submitFeedback(m, true, [], false); t.answered++; next(); } }, '✅ Fits'),
+        h('button', { class: 'btn', onclick: () => { t.step = 'why'; renderPanel(); } }, "❌ Doesn't fit"),
+        h('button', { class: 'btn', onclick: next }, 'Skip')));
+    } else {
+      b.appendChild(h('h3', { text: 'Why not? (optional)' }));
+      b.appendChild(reasonChips(t));
+      b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { submitFeedback(m, false, Array.from(t.reasons), false); t.answered++; next(); } }, 'Next')));
+    }
+    b.appendChild(h('div', { class: 'btns' }, backHome(t)));
+  }
+
+  function teachSort(b, t) {
+    const queue = sortQueue(t);
+    const m = queue[0];
+    b.appendChild(h('p', { class: 'progress', text: t.sorted + ' sorted · ' + queue.length + ' left from this feed' }));
+    if (!m) {
+      b.appendChild(h('p', { class: 'big', text: t.sorted ? '✓ You sorted everything YouTube offered so far.' : 'Nothing left to sort on this page.' }));
+      b.appendChild(loadMoreButton());
+      b.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { teach = null; markDirty(); closePanel(); } }, 'Apply to feed'),
+        backHome(t)));
+      return;
+    }
+    const after = () => { t.selected = new Set(); t.step = 'pick'; t.blockChannel = false; saveLearner(); markDirty(); queueScan(); renderPanel(); };
+    b.appendChild(videoCard(m, [m.channel, 'Labels: ' + describe(m), 'Currently ' + currentDecision(m)]));
+    if (t.step === 'never') {
+      b.appendChild(h('p', { class: 'big', text: 'Are you sure?' }));
+      b.appendChild(h('p', { class: 'note', text: 'This video will never be shown again, in any mood. You can undo it with "Reset what I learned".' }));
+      if (m.channel) {
+        const c = h('input', { type: 'checkbox' }); c.checked = t.blockChannel;
+        c.addEventListener('change', () => { t.blockChannel = c.checked; });
+        b.appendChild(row('Also block the channel ' + m.channel, null, c));
+      }
+      b.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => {
+          Lr.markNever(learner, m);
+          if (t.blockChannel && m.channel) { S.channelsBlocked = Array.from(new Set((S.channelsBlocked || []).concat([m.channel]))); saveSettings(); }
+          t.sorted++; after();
+        } }, 'Yes, never show it'),
+        h('button', { class: 'btn', onclick: () => { t.step = 'pick'; renderPanel(); } }, 'Cancel')));
+      return;
+    }
+    b.appendChild(h('h3', { text: 'Which moods does it fit? (pick all that apply)' }));
+    b.appendChild(h('div', { class: 'chips' },
+      moodList().map(x => h('button', { class: 'tchip' + (t.selected.has(x.key) ? ' on' : ''), onclick: () => { t.selected.has(x.key) ? t.selected.delete(x.key) : t.selected.add(x.key); renderPanel(); } }, x.label)),
+      h('button', { class: 'tchip', onclick: () => openEditor(null, 'sort', [m]) }, '＋ New mood')));
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn p', disabled: t.selected.size ? null : true, onclick: () => { Lr.sortVideo(learner, m, Array.from(t.selected), moodList()); t.sorted++; after(); } }, '✓ Save & next'),
+      h('button', { class: 'btn', onclick: () => { Lr.markNoMood(learner, m, moodList()); t.sorted++; after(); } }, 'Fits no mood'),
+      h('button', { class: 'btn', onclick: () => { t.skipped.add(m.id); after(); } }, 'Skip')));
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn', onclick: () => { t.step = 'never'; renderPanel(); } }, '🚫 Never show this'),
+      backHome(t)));
+    b.appendChild(loadMoreButton());
+  }
+
+  // ---- setup questionnaire --------------------------------------------------
+  const COMMON_MOODS = ['drained', 'anxious', 'unwind', 'laugh', 'curious', 'focused', 'sleep'];
+
+  /** @param onlyMood set up just this mood (from "Adjust what this mood shows") */
+  function openQuiz(onlyMood) {
+    const prev = (profile && profile.answers) || {};
+    const answers = JSON.parse(JSON.stringify(prev));
+    answers.perMood = answers.perMood || {};
+    if (!answers.moods) answers.moods = COMMON_MOODS.filter(k => allMoods()[k]);
+    if (onlyMood && !answers.moods.includes(onlyMood)) answers.moods.push(onlyMood);
+    for (const k of answers.moods) prefillMood(answers, k);
+    teach = { view: 'quiz', answers, i: 0, onlyMood: onlyMood || null };
+    activeTab = 'teach'; panelOpen = true; fb = null; checkInOpen = false;
+    renderPanel();
+  }
+  function prefillMood(answers, k) {
+    if (answers.perMood[k]) return;
+    const d = Pr.moodProfileFor(null, k, allMoods()[k]) || { like: [], avoid: [] };
+    answers.perMood[k] = { like: (d.like || []).slice(), avoid: (d.avoid || []).slice(), maxMinutes: d.maxMinutes || 0, likeWords: '', avoidWords: '' };
+  }
+  function quizSteps(t) {
+    const steps = [];
+    if (!t.onlyMood) for (const q of Pr.GENERAL_QUESTIONS) steps.push({ q, mood: null });
+    const moods = t.onlyMood ? [t.onlyMood] : t.answers.moods.filter(k => allMoods()[k]);
+    for (const k of moods) for (const q of Pr.MOOD_QUESTIONS) steps.push({ q, mood: k });
+    steps.push({ q: { id: 'summary', type: 'summary' }, mood: null });
+    return steps;
+  }
+
+  function teachQuiz(b, t) {
+    const steps = quizSteps(t);
+    t.i = Math.max(0, Math.min(t.i, steps.length - 1));
+    const step = steps[t.i], q = step.q, A = t.answers;
+    const moodName = step.mood ? (allMoods()[step.mood].emoji + ' ' + allMoods()[step.mood].label.toLowerCase()) : '';
+    const target = step.mood ? (A.perMood[step.mood] = A.perMood[step.mood] || {}) : A;
+    const go = d => { t.i += d; renderPanel(); };
+    const nav = (nextLabel) => h('div', { class: 'btns' },
+      t.i > 0 ? h('button', { class: 'btn', onclick: () => go(-1) }, '‹ Back') : h('button', { class: 'btn', onclick: () => { teach = { view: 'home' }; renderPanel(); } }, 'Cancel'),
+      h('button', { class: 'btn p', onclick: () => go(1) }, nextLabel || 'Next ›'));
+
+    b.appendChild(h('p', { class: 'progress', text: q.type === 'summary' ? 'Almost done' : 'Question ' + (t.i + 1) + ' of ' + (steps.length - 1) + (step.mood ? ' · ' + moodName : '') }));
+    if (q.type === 'summary') return quizSummary(b, t);
+    b.appendChild(h('p', { class: 'big', text: q.q.replace('{mood}', moodName) }));
+    if (q.help) b.appendChild(h('p', { class: 'note', text: q.help }));
+
+    if (q.type === 'multi') {
+      let opts;
+      if (q.options === 'types') {
+        const exclude = q.id === 'avoid' ? (target.like || []) : q.id === 'hard' ? (A.easy || []) : [];
+        opts = C.TYPES.filter(k => !exclude.includes(k)).map(k => [k, C.TYPE_DEFS[k].emoji + ' ' + C.TYPE_DEFS[k].label]);
+      } else if (q.options === 'strain') opts = Object.keys(Pr.STRAIN).map(k => [k, Pr.STRAIN[k]]);
+      else opts = moodList().map(x => [x.key, x.label]);
+      const cur = new Set(target[q.id] || []);
+      b.appendChild(h('div', { class: 'chips' }, opts.map(([k, l]) => h('button', { class: 'tchip' + (cur.has(k) ? ' on' : ''), onclick: () => {
+        cur.has(k) ? cur.delete(k) : cur.add(k); target[q.id] = Array.from(cur);
+        if (q.id === 'moods') for (const m of target.moods) prefillMood(A, m);
+        renderPanel();
+      } }, l))));
+      b.appendChild(nav());
+    } else if (q.type === 'single') {
+      b.appendChild(h('div', { class: 'choice' }, q.options.map(([v, l]) => h('button', { class: 'preset' + (String(target[q.id]) === String(v) ? ' on' : ''), onclick: () => { target[q.id] = v; go(1); } }, l))));
+      b.appendChild(nav('Skip ›'));
+    } else if (q.type === 'words') {
+      const mk = (key, ph) => { const i = h('input', { type: 'text', placeholder: ph, style: 'width:100%;margin:4px 0' }); i.value = target[key] || ''; i.addEventListener('input', () => { target[key] = i.value; }); return i; };
+      b.appendChild(h('p', { class: 'note', text: 'Perfect for this mood:' }));
+      b.appendChild(mk('likeWords', 'e.g. lofi, Bob Ross, Stardew Valley'));
+      b.appendChild(h('p', { class: 'note', text: 'Keep away:' }));
+      b.appendChild(mk('avoidWords', 'e.g. true crime, reaction, election'));
+      b.appendChild(nav());
+    }
+  }
+
+  function quizSummary(b, t) {
+    const A = t.answers;
+    const built = Pr.build(A);
+    const tl = ts => (ts || []).map(k => (C.TYPE_DEFS[k] || {}).emoji || k).join(' ') || '–';
+    b.appendChild(h('p', { class: 'big', text: 'Here\'s what Mindful Feed will do' }));
+    if (!t.onlyMood) {
+      const cal = built.calibration;
+      b.appendChild(h('p', { class: 'note', text: 'Easy for you: ' + tl(cal.easy) + ' · Demanding for you: ' + tl(cal.hard) +
+        (cal.strain.length ? ' · Tiring: ' + cal.strain.map(k => Pr.STRAIN[k].toLowerCase()).join(', ') : '') +
+        (cal.lengthMin ? ' · Feels long after ' + cal.lengthMin + ' min' : '') }));
+    }
+    for (const k of Object.keys(built.moodProfiles)) {
+      if (t.onlyMood && k !== t.onlyMood) continue;
+      if (!allMoods()[k]) continue;
+      const mp = built.moodProfiles[k], o = built.overrides[k] || {};
+      b.appendChild(h('div', { class: 'log' },
+        h('div', { text: allMoods()[k].emoji + ' ' + allMoods()[k].label }),
+        h('div', { class: 'r', text: 'Shows ' + tl(mp.like) + ' · keeps away ' + tl(mp.avoid) + (mp.maxMinutes ? ' · up to ' + mp.maxMinutes + ' min' : '') +
+          (o.emotional ? ' · emotional: ' + (o.emotional === 'show' ? 'allowed' : 'hidden') : '') +
+          (mp.likeWords.length ? ' · + ' + mp.likeWords.join(', ') : '') + (mp.avoidWords.length ? ' · − ' + mp.avoidWords.join(', ') : '') })));
+    }
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn', onclick: () => { t.i--; renderPanel(); } }, '‹ Back'),
+      h('button', { class: 'btn p', onclick: () => {
+        const merged = t.onlyMood && profile ? Pr.build(Object.assign({}, profile.answers, { perMood: Object.assign({}, profile.answers.perMood, { [t.onlyMood]: A.perMood[t.onlyMood] }), moods: Array.from(new Set((profile.answers.moods || []).concat([t.onlyMood]))) })) : built;
+        profile = merged; saveProfile();
+        profiles.clear();
+        if (currentPreset && allMoods()[currentPreset]) applyPreset(currentPreset);
+        markDirty();
+        teach = { view: 'home', saved: true };
+        if (t.onlyMood) activeTab = 'now';
+        renderPanel();
+      } }, 'Save & apply')));
+  }
+
+  // ---- mood editor ----------------------------------------------------------
+  const EMOJIS = ['🎵', '🎮', '🍳', '🌍', '🐾', '🎨', '📖', '🏃', '🧘', '✨', '🌊', '🔧', '🚀', '☕'];
+
+  /** @param mood existing custom mood or null · @param back 'home'|'now'|'sort' · @param preAdd videos to add */
+  function openEditor(mood, back, preAdd) {
+    const base = mood ? JSON.parse(JSON.stringify(mood)) : {
+      id: 'mood_' + Date.now().toString(36), emoji: '✨', label: '', hint: 'Your own mood', custom: true,
+      set: { need: 'custom', loads: [0, 1, 2], tone: 'any', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, includeNoMood: false },
+    };
+    teach = { view: 'editor', draft: base, isNew: !mood, back: back || 'home', add: new Set((preAdd || []).map(x => x.id)), preAdd: preAdd || [], prev: teach };
+    activeTab = 'teach'; panelOpen = true; fb = null;
+    renderPanel();
+  }
+
+  function teachEditor(b, t) {
+    const d = t.draft, st = d.set;
+    const leave = () => {
+      if (t.back === 'now') { teach = null; activeTab = 'now'; }
+      else if (t.back === 'sort' && t.prev && t.prev.view === 'sort') teach = t.prev;
+      else teach = { view: 'home' };
+      renderPanel();
+    };
+    b.appendChild(h('p', { class: 'big', text: t.isNew ? 'Create a mood' : 'Edit ' + d.emoji + ' ' + d.label }));
+    const name = h('input', { type: 'text', placeholder: 'Name, e.g. "Cozy gaming"', style: 'width:100%' });
+    name.value = d.label; name.addEventListener('input', () => { d.label = name.value; });
+    b.appendChild(name);
+    const emoji = h('input', { type: 'text', style: 'width:56px;text-align:center;font-size:20px', 'aria-label': 'Emoji' });
+    emoji.value = d.emoji; emoji.addEventListener('input', () => { d.emoji = emoji.value.trim() || '✨'; });
+    b.appendChild(h('div', { class: 'row' }, h('label', null, 'Emoji'), emoji));
+    b.appendChild(h('div', { class: 'chips' }, EMOJIS.map(e => h('button', { class: 'tchip' + (d.emoji === e ? ' on' : ''), onclick: () => { d.emoji = e; renderPanel(); } }, e))));
+    const baseSel = h('select', { onchange: e => { st.need = e.target.value; } },
+      Object.keys(P.NEED_LABELS).map(k => { const o = h('option', { value: k }, P.NEED_LABELS[k]); if (st.need === k) o.selected = true; return o; }));
+    b.appendChild(row('Start from', '"Only what I teach it" shows just the videos you add or sort into this mood', baseSel));
+    const loads = P.loadsOf(st);
+    b.appendChild(row('Videos that are', null, h('div', { class: 'seg' }, [[0, 'Easy'], [1, 'Medium'], [2, 'Demanding']].map(([v, l]) => h('button', { class: loads.includes(v) ? 'on' : '', onclick: () => {
+      const set = new Set(loads); set.has(v) ? set.delete(v) : set.add(v); if (set.size) { st.loads = Array.from(set).sort(); renderPanel(); }
+    } }, l)))));
+    const segSet = (key, opts) => seg(opts, st[key], v => { st[key] = v; renderPanel(); });
+    b.appendChild(row('Tone', null, segSet('tone', [['light', 'Light'], ['balanced', 'Balanced'], ['any', 'Any']])));
+    b.appendChild(row('Politics', null, segSet('politics', [['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']])));
+    b.appendChild(row('News', null, segSet('news', [['hide', 'No'], ['show', 'Yes']])));
+    b.appendChild(row('Distressing topics', null, segSet('distressing', [['hide', 'Hide'], ['show', 'Allow']])));
+    if (!st.music) st.music = 'show';
+    if (!st.emotional) st.emotional = 'show';
+    b.appendChild(row('Music', null, segSet('music', [['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']])));
+    b.appendChild(row('Emotional', null, segSet('emotional', [['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']])));
+    const prof = d.profile = d.profile || { like: [], avoid: [], maxMinutes: null, likeWords: [], avoidWords: [] };
+    const typeChips = (key, other) => h('div', { class: 'chips' }, C.TYPES.filter(k => !(prof[other] || []).includes(k)).map(k =>
+      h('button', { class: 'tchip' + ((prof[key] || []).includes(k) ? ' on' : ''), onclick: () => {
+        const set = new Set(prof[key] || []); set.has(k) ? set.delete(k) : set.add(k); prof[key] = Array.from(set); renderPanel();
+      } }, C.TYPE_DEFS[k].emoji + ' ' + C.TYPE_DEFS[k].label)));
+    b.appendChild(h('h3', { text: 'What fits this mood' }));
+    b.appendChild(typeChips('like', 'avoid'));
+    b.appendChild(h('h3', { text: 'Keep away' }));
+    b.appendChild(typeChips('avoid', 'like'));
+    b.appendChild(row('Longest videos', null, seg([[0, 'Any'], [10, '10 min'], [20, '20 min'], [45, '45 min']], prof.maxMinutes || 0, v => { prof.maxMinutes = v || null; renderPanel(); })));
+    const inc = h('input', { type: 'checkbox' }); inc.checked = !!st.includeNoMood;
+    inc.addEventListener('change', () => { st.includeNoMood = inc.checked; });
+    b.appendChild(row('Also show the whole "fits no mood" pile', null, inc));
+
+    const pile = t.preAdd.concat(Lr.noMoodVideos(learner).filter(x => !t.preAdd.some(p => p.id === x.id)));
+    b.appendChild(h('h3', { text: 'Add videos' + (pile.length ? '' : ' – your "fits no mood" pile is empty') }));
+    if (pile.length) b.appendChild(h('p', { class: 'note', text: 'From your "fits no mood" pile. Similar videos will join this mood automatically.' }));
+    for (const x of pile.slice(0, 60)) {
+      const c = h('input', { type: 'checkbox' }); c.checked = t.add.has(x.id);
+      c.addEventListener('change', () => { c.checked ? t.add.add(x.id) : t.add.delete(x.id); });
+      b.appendChild(h('label', { class: 'card', style: 'align-items:center;cursor:pointer' }, c,
+        h('img', { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(x.id) + '/mqdefault.jpg', alt: '', loading: 'lazy', style: 'width:96px', onerror: e => { e.target.style.visibility = 'hidden'; } }),
+        h('div', null, h('div', { class: 't', text: x.title || x.id }), h('div', { class: 'm', text: x.channel || '' }))));
+    }
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn p', onclick: () => {
+        d.label = (d.label || '').trim();
+        if (!d.label) { name.focus(); name.placeholder = 'Please give your mood a name'; return; }
+        d.hint = (P.NEED_LABELS[st.need] || 'Your own mood') + (t.add.size ? ' · ' + t.add.size + ' videos' : '');
+        const i = customMoods.findIndex(m => m.id === d.id);
+        if (i >= 0) customMoods[i] = d; else customMoods.push(d);
+        saveMoods();
+        const byId = new Map(pile.map(x => [x.id, x]));
+        for (const id of t.add) { const x = byId.get(id); if (x) Lr.feedback(learner, x, d.id, true, [], d.emoji + ' ' + d.label, 1); }
+        saveLearner();
+        if (t.back === 'sort' && t.prev && t.prev.view === 'sort') { t.prev.selected.add(d.id); leave(); return; }
+        applyPreset(d.id); markDirty(); teach = null; activeTab = 'now'; renderPanel();
+      } }, t.isNew ? 'Create & use this mood' : 'Save'),
+      h('button', { class: 'btn', onclick: leave }, 'Cancel'),
+      !t.isNew ? h('button', { class: 'btn', onclick: () => {
+        if (!confirm('Delete the mood "' + d.label + '"?')) return;
+        customMoods = customMoods.filter(m => m.id !== d.id); saveMoods();
+        if (currentPreset === d.id) { currentPreset = null; store.set('preset', null); }
+        leave();
+      } }, 'Delete') : null));
+  }
+
+  function renderAi(b) {
+    b.appendChild(h('p', { class: 'note', text: 'Keyword rules work offline and for free. Optionally, Claude can classify each video more accurately (needs your own Anthropic API key; titles and channel names are sent to the API, nothing else).' }));
+    if (!native) {
+      b.appendChild(h('p', { text: 'AI classification is only available in the Android app.' }));
+      return;
+    }
+    b.appendChild(row('Status', null, h('span', { class: 'pill', text: aiStatus })));
+    b.appendChild(row('Use AI classification', null, check('aiEnabled', () => { if (S.aiEnabled) { profiles.clear(); for (const v of verdicts.values()) profileFor(v.meta); } renderPanel(); })));
+    const sel = h('select', { onchange: e => { S.aiModel = e.target.value; saveSettings(); } },
+      [['claude-opus-5-5', 'Claude Opus 5.5 (most accurate)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (cheaper)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (cheapest)']]
+        .map(([v, l]) => { const o = h('option', { value: v }, l); if (S.aiModel === v) o.selected = true; return o; }));
+    b.appendChild(row('Model', null, sel));
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn', onclick: () => native.postMessage(JSON.stringify({ type: 'openSettings' })) }, 'Set API key'),
+      h('button', { class: 'btn', onclick: () => { aiCache = {}; profiles.clear(); persistSoon(); aiStatus = 'cache cleared'; renderPanel(); } }, 'Clear AI cache')));
+  }
+
+  function maybeCheckIn() {
+    const every = Number(S.checkInEveryHours) || 0;
+    if (!every || !S.enabled) return;
+    if (Date.now() - lastCheckIn < every * 3600000) return;
+    if (pageContext() !== 'home') return;
+    checkInOpen = true; renderPanel();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+  function boot() {
+    initNative();
+    applyCss();
+    updatePostsClass();
+    expireShelf();
+    mountUi();
+    const mo = new MutationObserver(queueScan);
+    mo.observe(document.body, { childList: true, subtree: true });
+    onNavigate();
+    setTimeout(maybeCheckIn, 800);
+  }
+  if (document.documentElement) applyCss();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+
+  // Exposed for debugging / the Android host.
+  window.MindfulFeed = {
+    settings: () => S, shelf: () => shelf, verdicts, openPanel,
+    checkIn: () => { checkInOpen = true; renderPanel(); },
+  };
+})();
