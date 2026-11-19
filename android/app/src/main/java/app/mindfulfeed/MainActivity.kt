@@ -186,9 +186,10 @@ class MainActivity : ComponentActivity() {
         val items = msg.optJSONArray("items") ?: JSONArray()
         val needs = msg.optJSONArray("needs").toStringList().ifEmpty { DEFAULT_NEEDS }
         val topics = msg.optJSONArray("topics").toStringList()
+        val feedback = msg.optJSONArray("feedback") ?: JSONArray()
         aiExecutor.execute {
             val response = try {
-                val results = classifier(key).classify(model, items, needs, topics)
+                val results = classifier(key).classify(model, items, needs, topics, feedback)
                 JSONObject().put("type", "classifyResult").put("requestId", requestId).put("results", results).toString()
             } catch (e: AiClassifier.AiException) {
                 error(requestId, e.message ?: "AI error")

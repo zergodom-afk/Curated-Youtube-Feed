@@ -156,7 +156,8 @@ test('watch page: no recommendations, no end screen, playlist kept, info budget 
   ids = await renderedIds(page);
   assert.deepEqual(ids, [], 'XHR continuation filtered too');
   // "+ Later shelf" chip shows on watch pages
-  const chip = page.locator('#mindful-feed-ui').locator('.chip');
+  const chip = page.locator('#mindful-feed-ui').locator('.chip:not(.rate)');
+  assert.equal(await page.locator('#mindful-feed-ui').locator('.chip.rate').isVisible(), true, '"Fits my mode?" chip on watch pages');
   await chip.waitFor();
   await chip.click();
   assert.match(await chip.innerText(), /On your shelf/);
@@ -189,5 +190,67 @@ test('DOM safety net filters cards that never went through the JSON layer', { sk
   assert.deepEqual(ids, ['dom_relax01']);
   // labels are added to visible cards
   assert.match(await page.locator('#feed .mf-badge').first().innerText(), /easy/);
+  await ctx.close();
+});
+
+test('check-in: Focused asks political / apolitical / both', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  await page.goto('https://m.youtube.com/');
+  const ui = page.locator('#mindful-feed-ui');
+  await ui.locator('.sheet').waitFor();
+  await ui.getByRole('button', { name: /Focused/ }).click();
+  assert.match(await ui.locator('.sheet').innerText(), /Which topics are you up for/);
+  await Promise.all([page.waitForNavigation(), ui.getByRole('button', { name: /Only political/ }).click()]);
+  const s = await page.evaluate(() => window.MindfulFeed.settings());
+  assert.equal(s.need, 'learn');
+  assert.equal(s.politics, 'only');
+  assert.deepEqual(s.loads, [1, 2]);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('feedback sheet: "doesn\'t fit" hides the card at once and is remembered after reload', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  await page.addInitScript(() => localStorage.setItem('mindful:lastCheckIn', String(Date.now())));
+  await page.goto('https://m.youtube.com/');
+  const badge = page.locator('#feed a[href$="vid_garden1"]').locator('xpath=..').locator('.mf-badge');
+  await badge.waitFor();
+  await badge.click();
+  const ui = page.locator('#mindful-feed-ui');
+  assert.match(await ui.locator('.sheet').innerText(), /Does this fit right now/);
+  await ui.getByRole('button', { name: /Doesn't fit/ }).click();
+  await ui.getByRole('button', { name: /Too heavy/ }).click();
+  await ui.getByRole('button', { name: /^Save$/ }).click();
+  assert.match(await ui.locator('.sheet').innerText(), /Got it/);
+  await page.waitForFunction(() => !document.querySelector('#feed a[href$="vid_garden1"]').closest('ytm-rich-item-renderer').offsetParent);
+  await ui.getByRole('button', { name: /^Done$/ }).click();
+  await page.reload();
+  const ids = await renderedIds(page);
+  assert.ok(!ids.includes('vid_garden1'), 'still filtered after reload');
+  await page.waitForFunction(() => localStorage.getItem('mindful:log'));
+  const log = await page.evaluate(() => JSON.parse(localStorage.getItem('mindful:log')).map(x => x.reason));
+  assert.ok(log.some(r => /you said this doesn't fit/.test(r)), log.join(' | '));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('Teach wizard walks through feed videos and records answers', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  await page.addInitScript(() => localStorage.setItem('mindful:lastCheckIn', String(Date.now())));
+  await page.goto('https://m.youtube.com/');
+  const ui = page.locator('#mindful-feed-ui');
+  await ui.locator('.fab').click();
+  await ui.getByRole('button', { name: /Teach/ }).click();
+  await ui.getByRole('button', { name: /^Start$/ }).click();
+  assert.match(await ui.locator('.progress').innerText(), /^1 \/ \d+/);
+  await ui.getByRole('button', { name: /^✅ Fits$/ }).click();
+  assert.match(await ui.locator('.progress').innerText(), /^2 \//);
+  await ui.getByRole('button', { name: /Doesn't fit/ }).click();
+  await ui.getByRole('button', { name: /Political/ }).click();
+  await ui.getByRole('button', { name: /^Next$/ }).click();
+  assert.match(await ui.locator('.progress').innerText(), /^3 \//);
+  const count = await page.evaluate(() => JSON.parse(localStorage.getItem('mindful:learner')).count);
+  assert.equal(count, 2);
+  assert.deepEqual(errors, []);
   await ctx.close();
 });

@@ -6,9 +6,10 @@ your account and history, and only lets through what fits **how you feel right n
 
 <p>
 <img src="docs/screenshots/1-checkin.png" width="190" alt="Mood check-in">
-<img src="docs/screenshots/2-feed.png" width="190" alt="Filtered feed with labels">
+<img src="docs/screenshots/6-focused-ask.png" width="190" alt="Focused: political or not">
+<img src="docs/screenshots/7-feedback.png" width="190" alt="Does this fit? feedback">
+<img src="docs/screenshots/8-teach.png" width="190" alt="Teach wizard">
 <img src="docs/screenshots/4-shelf.png" width="190" alt="Later shelf">
-<img src="docs/screenshots/5-log.png" width="190" alt="Filter log">
 </p>
 
 ## Why
@@ -36,17 +37,23 @@ load, tone and politics**. None of them solves the *Watch Later guilt pile* eith
 | 🛋️ Just unwinding | easy entertainment and light curiosity |
 | 😂 Need a laugh | comedy, wholesome, fun |
 | 🤔 Curious | interesting, not too demanding |
-| 🧠 Focused | deep dives, lectures; politics/news allowed |
+| 🧠 Focused | medium and deep content only, never easy. Asks a follow-up: apolitical, only political, or both |
 | 🛠️ Want to make something | recipes, DIY, workouts, tutorials |
 | 🌱 Need a lift | inspiring, hopeful |
 | 🌙 Winding down for sleep | calm, slow, nothing stimulating |
 
+**Modes are strict.** Only videos that clearly match the mode are shown.
+Focused hides easy videos, Drained and Sleep show only easy ones, and Need a
+lift shows only clearly uplifting ones. Videos the rules can't classify are
+held back, except in *Just unwinding*. The "Only clear matches" switch turns
+this off.
+
 Everything can be fine-tuned:
 
 - **need**: relaxation · laughter · light curiosity · learning · doing/making · inspiration · comfort
-- **mental capacity**: relaxed / in-between / strenuous
+- **difficulty to show**: any combination of easy / medium / demanding
 - **tone**: light-hearted / balanced / anything
-- **politics**: apolitical / political ok
+- **politics**: apolitical / both / only political
 - **news**: on / off
 - **distressing topics** (crime, war, disasters, horror): on / off
 
@@ -79,7 +86,28 @@ handles them differently:
   your current capacity, not a list.
 - A **＋ Later shelf** chip on every video replaces Watch Later.
 
-**5. Transparency.** The *Filtered* tab lists every video the algorithm wanted
+**5. Teach it what fits you (works without an API key)**
+
+The same video can lift one person and weigh on another. Tap the
+**👍👎 label** under any video, or **"Fits my mode?"** while watching, and say
+whether it fits your current mode. Optionally say why: too heavy, too
+demanding, too shallow, political, parasocial, clickbait, or wrong vibe.
+
+- That exact video follows your answer from then on.
+- **Similar videos follow too.** The app learns small word and channel weights
+  on your device. Once a new video shares two or more title words (or a word
+  and the channel) with videos you rated, it is treated the same way.
+- The reasons are learned across modes. "Too heavy" teaches what feels heavy
+  *to you*, and that then applies in every calm mode.
+- **🎓 Teach** is a short wizard. It shows up to 10 videos from your feed,
+  some shown and some held back, and you answer *fits / doesn't fit / skip*.
+  It also shows what it has learned, and you can reset that.
+- In the *Filtered* tab, "👍 Should be shown" corrects a wrong hide.
+- **With an API key**, your recent answers are also sent to Claude with each
+  classification request, so its labels match your sense of "heavy" or
+  "uplifting".
+
+**6. Transparency.** The *Filtered* tab lists every video the algorithm wanted
 to show you and why it didn't. Tap one to watch it anyway, or trust its channel.
 Optional labels on each video show what it is (🌿 easy · light, 📚 demanding …).
 
@@ -92,6 +120,7 @@ YouTube's own response (ytInitialData, /youtubei/v1/browse|next|player)
 core/extractor.js   finds every video item in any renderer shape
 core/classifier.js  → needs, cognitive load, tone, political, news,
                        distressing, parasocial, addictive, topics
+core/learner.js     → your own "fits / doesn't fit" answers, generalised to similar videos
 core/policy.js      → show / hide / put on shelf, given your current state
         │
         ▼

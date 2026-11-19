@@ -90,6 +90,16 @@
       ['secretly', 1], ['hidden truth', 2], ['what happens next', 2], ['viral', 1],
       ['giveaway', 2],
     ],
+    // Heavy themes that aren't "distressing" events: existential, bleak, alarming.
+    heavy: [
+      'dangers of', 'the danger of', 'dangerous', 'nihilis*', 'meaningless*', 'nothing matters', 'believing in nothing', 'existential*',
+      'dread', 'despair', 'depressing', 'depression', 'lonel*', 'grief', 'griev*', 'dark truth',
+      'the dark side', 'warning', 'why you should be worried', 'worried', 'scared', 'fear of', 'afraid',
+      'we are doomed', 'the end of humanity', 'no future', 'hopeless*', 'bleak', 'sad truth',
+      'harsh truth', 'brutal truth', 'uncomfortable truth', 'regret*', 'burnout', 'midlife crisis',
+      'quarter life crisis', 'void', 'death of', 'dying', 'nobody cares', 'traurig', 'einsam*', 'angst',
+      'gefahr*', 'sinnlos*',
+    ],
     relax: [
       'relax*', 'calm*', 'ambient', 'ambience', 'asmr', 'lofi', 'lo-fi', 'chill*', 'sleep*',
       'meditat*', 'breathing', 'yoga', 'nature sounds', 'rain sounds', 'rain', 'ocean waves',
@@ -271,6 +281,8 @@
     const create = score(COMPILED.create, titleLc);
     const inspire = score(COMPILED.inspire, titleLc);
     const comfort = score(COMPILED.comfort, text);
+    const heavyTheme = score(COMPILED.heavy, titleLc);
+    if (heavyTheme.labels.length) reasons.push('heavy theme: ' + heavyTheme.labels.slice(0, 3).join(', '));
 
     let addictive = add.score + typo.score;
     if (add.labels.length) reasons.push('clickbait: ' + add.labels.join(', '));
@@ -294,12 +306,14 @@
 
     // --- needs -------------------------------------------------------------
     const needs = new Set();
-    if (relax.score && !distressing && !political) needs.add('relax');
+    const gentle = !distressing && !heavyTheme.score;
+    if (relax.score && gentle && !political) needs.add('relax');
     if (laugh.score && !distressing) needs.add('laugh');
     // "Funny sketch: my cat reviews my cooking" is comedy, not a recipe.
     if (create.score && !(laugh.score && !info.score)) needs.add('create');
+    // "How I overcame burnout": uplifting for some, too much for others → inspire, but not "light".
     if (inspire.score && !distressing) needs.add('inspire');
-    if (comfort.score && !distressing && !political) needs.add('comfort');
+    if (comfort.score && gentle && !political) needs.add('comfort');
 
     // --- cognitive load ----------------------------------------------------
     let load = 0;
@@ -322,8 +336,9 @@
 
     // --- tone --------------------------------------------------------------
     let tone = 'neutral';
-    if (distressing || political || isNews || add.labels.some(l => /rage|destroy|slams|humiliat|evisc|meltdown|goes off/.test(l))) tone = 'heavy';
-    else if (needs.has('laugh') || needs.has('relax') || needs.has('comfort')) tone = 'light';
+    if (heavyTheme.score && inspire.score && !distressing && !political && !isNews) tone = 'neutral';
+    else if (distressing || political || isNews || heavyTheme.score || add.labels.some(l => /rage|destroy|slams|humiliat|evisc|meltdown|goes off/.test(l))) tone = 'heavy';
+    else if (needs.has('laugh') || needs.has('relax') || needs.has('comfort') || needs.has('inspire')) tone = 'light';
 
     // --- topics ------------------------------------------------------------
     const topics = [];
@@ -333,7 +348,7 @@
     if (political && !topics.includes('politics')) topics.push('politics');
     if (isNews && !topics.includes('news')) topics.push('news');
 
-    const known = needs.size > 0 || informational || political || isNews || distressing ||
+    const known = needs.size > 0 || informational || political || isNews || distressing || heavyTheme.score > 0 ||
       parasocial > 0 || addictive > 0;
 
     return {

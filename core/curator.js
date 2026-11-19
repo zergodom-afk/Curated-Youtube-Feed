@@ -24,7 +24,8 @@
   const C = window.MindfulClassifier;
   const X = window.MindfulExtractor;
   const P = window.MindfulPolicy;
-  if (!C || !X || !P) { console.warn('[MindfulFeed] core modules missing'); return; }
+  const Lr = window.MindfulLearner;
+  if (!C || !X || !P || !Lr) { console.warn('[MindfulFeed] core modules missing'); return; }
 
   // ---------------------------------------------------------------------------
   // Storage (localStorage on the YouTube origin; survives app restarts)
@@ -46,6 +47,14 @@
   let aiCache = store.get('aiCache', {});
   let lastCheckIn = store.get('lastCheckIn', 0);
   let currentPreset = store.get('preset', null);
+  let learner = Lr.load(store.get('learner', null));
+  function saveLearner() { store.set('learner', learner); }
+  /** Feedback is learned per need (Drained & Sleep share "relax", all Focused variants share "learn"). */
+  function modeKey() { return S.need; }
+  function modeLabel() {
+    const pr = currentPreset && P.PRESETS[currentPreset];
+    return pr ? pr.emoji + ' ' + pr.label : (P.NEED_LABELS[S.need] || S.need);
+  }
 
   const verdicts = new Map(); // id -> {meta, prof, d}
   const profiles = new Map();
@@ -53,10 +62,13 @@
   // Mutable runtime state (declared up front: hooks may fire early).
   let native = null, aiQueue = [], aiInFlight = 0, aiStatus = 'unavailable', aiReqSeq = 1;
   const aiPending = new Map();
-  let host = null, shadow = null, wrapEl = null, fabEl = null, chipEl = null;
+  let host = null, shadow = null, wrapEl = null, fabEl = null, chipEl = null, rateChipEl = null;
   let panelOpen = false, activeTab = 'now', checkInOpen = false;
   let styleEl = null, scanQueued = false, dirty = false;
   let lastHref = location.href, lastWatched = null;
+  let checkInAsk = null;                       // preset key whose follow-up question is showing
+  let fb = null;                               // open feedback sheet: {meta, step, reasons:Set, blockChannel}
+  let teach = null;                            // wizard: {queue, i, step, reasons:Set, answered}
 
   function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
   function refreshInfoWindow() {
@@ -122,16 +134,22 @@
     return prof;
   }
 
+  /** Pure decision (no logging, no shelf side effects). */
+  function decisionFor(meta, context) {
+    const learned = Lr.judge(learner, meta, modeKey());
+    const prof = Lr.adjustProfile(profileFor(meta), learned);
+    return { prof, d: P.decide(meta, prof, S, { context, infoUsed: infoUsed(), learned }) };
+  }
+
   function evaluate(meta, context) {
-    const prof = profileFor(meta);
-    const d = P.decide(meta, prof, S, { context, infoUsed: infoUsed() });
+    const { prof, d } = decisionFor(meta, context);
     const prev = verdicts.get(meta.id);
     verdicts.set(meta.id, { meta, prof, d, context });
     if (!prev || prev.d.action !== d.action) {
       if (d.action !== 'show') {
         // one entry per video: a reload re-evaluates the same items
         filterLog = filterLog.filter(x => x.id !== meta.id);
-        filterLog.push({ id: meta.id, title: meta.title, channel: meta.channel, reason: d.reason, action: d.action, at: Date.now() });
+        filterLog.push({ id: meta.id, title: meta.title, channel: meta.channel, durationText: meta.durationText, reason: d.reason, action: d.action, mode: modeKey(), at: Date.now() });
         if (filterLog.length > 200) filterLog = filterLog.slice(-150);
       }
       if (d.action === 'shelf') autoShelf(meta, prof, d.reason);
@@ -333,7 +351,7 @@
   function baseCss() {
     const rules = [];
     rules.push('.mf-hidden{display:none!important}');
-    rules.push('.mf-badge{display:inline-flex;gap:4px;align-items:center;margin:2px 12px 6px;padding:2px 8px;border-radius:999px;font:500 11px/1.6 Roboto,Arial,sans-serif;background:rgba(127,127,127,.15);color:inherit;opacity:.85;width:max-content;max-width:90%}');
+    rules.push('.mf-badge{cursor:pointer;display:inline-flex;gap:4px;align-items:center;margin:2px 12px 6px;padding:2px 8px;border-radius:999px;font:500 11px/1.6 Roboto,Arial,sans-serif;background:rgba(127,127,127,.15);color:inherit;opacity:.85;width:max-content;max-width:90%}');
     if (S.hideShorts) {
       rules.push('ytm-reel-shelf-renderer,ytm-shorts-lockup-view-model,ytm-shorts-lockup-view-model-v2,ytd-reel-shelf-renderer,ytd-rich-shelf-renderer[is-shorts],grid-shelf-view-model:has(ytm-shorts-lockup-view-model),ytm-rich-section-renderer:has(ytm-shorts-lockup-view-model),ytm-rich-section-renderer:has(ytm-reel-shelf-renderer),ytm-pivot-bar-item-renderer:has(.pivot-shorts),ytd-guide-entry-renderer:has(a[title="Shorts"]),ytd-mini-guide-entry-renderer[aria-label="Shorts"]{display:none!important}');
     }
@@ -422,8 +440,10 @@
     const icons = (p.needs || []).map(n => NEED_ICON[n]).filter(Boolean).slice(0, 3).join('');
     const label = (icons ? icons + ' ' : '') + LOAD_LABEL[p.load] + (p.tone === 'light' ? ' · light' : '') + (p.source === 'ai' ? ' · ✦' : '');
     const b = document.createElement('div');
-    b.className = 'mf-badge'; b.textContent = label;
-    b.title = (p.reasons || []).join('\n');
+    b.className = 'mf-badge'; b.textContent = label + '  ·  👍👎';
+    b.title = (p.reasons || []).join('\n') + '\nTap to tell Mindful Feed whether this fits.';
+    b.setAttribute('role', 'button');
+    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openFeedback(v.meta); }, true);
     card.appendChild(b);
   }
 
@@ -498,6 +518,7 @@
     try {
       native.postMessage(JSON.stringify({
         type: 'classify', requestId: reqId, model: S.aiModel, needs: C.NEEDS, topics: C.TOPICS,
+        feedback: Lr.examplesForAi(learner, 40),
         items: batch.map(m => ({ id: m.id, title: m.title, channel: m.channel || '', duration: m.durationText || '', snippet: (m.description || '').slice(0, 200) })),
       }));
     } catch (e) { aiInFlight--; aiStatus = 'error: ' + e.message; }
@@ -568,6 +589,10 @@
   .fab .dot{position:absolute;top:6px;right:6px;width:10px;height:10px;border-radius:50%;background:#f2c14e;border:2px solid var(--acc)}
   .chip{position:fixed;right:70px;bottom:80px;z-index:2147483000;border:none;border-radius:999px;padding:8px 12px;
     background:var(--bg);color:var(--fg);box-shadow:0 2px 10px rgba(0,0,0,.2);font:500 13px system-ui,sans-serif;cursor:pointer}
+  .chip.rate{bottom:128px}
+  .progress{color:var(--mut);font-size:12.5px;margin:0 0 6px}
+  .choice{display:flex;flex-direction:column;gap:8px;margin:10px 0}
+  .choice .preset{width:100%}
   .sheet{position:fixed;inset:auto 0 0 0;z-index:2147483001;max-height:88vh;overflow:auto;background:var(--bg);
     border-radius:18px 18px 0 0;box-shadow:0 -8px 30px rgba(0,0,0,.3);padding:14px 16px 28px}
   @media (min-width:700px){.sheet{left:auto;right:16px;bottom:16px;width:420px;border-radius:18px}}
@@ -629,6 +654,12 @@
       chipEl.textContent = '✓ On your shelf';
     } }, '＋ Later shelf');
     wrapEl.appendChild(chipEl);
+    rateChipEl = h('button', { class: 'chip rate', style: 'display:none', onclick: () => {
+      const vid = currentVideoId(); if (!vid) return;
+      const v = verdicts.get(vid);
+      openFeedback(v ? v.meta : { id: vid, title: (document.title || '').replace(/\s*-\s*YouTube\s*$/, ''), channel: '', kind: 'video' });
+    } }, '👍👎 Fits my mode?');
+    wrapEl.appendChild(rateChipEl);
     document.body.appendChild(host);
     updateFabDot(); updateWatchChip();
   }
@@ -638,6 +669,7 @@
     const vid = currentVideoId();
     const show = pageContext() === 'watch' && S.shelfEnabled && !!vid;
     chipEl.style.display = show ? '' : 'none';
+    if (rateChipEl) rateChipEl.style.display = pageContext() === 'watch' && vid ? '' : 'none';
     if (show) chipEl.textContent = shelf.some(x => x.id === vid) ? '✓ On your shelf' : '＋ Later shelf';
   }
 
@@ -650,24 +682,25 @@
   }
 
   function openPanel(tab) { panelOpen = true; activeTab = tab || activeTab; renderPanel(); }
-  function closePanel() { panelOpen = false; checkInOpen = false; renderPanel(); if (dirty) reloadIfFeed(); }
+  function closePanel() { panelOpen = false; checkInOpen = false; checkInAsk = null; fb = null; renderPanel(); if (dirty) reloadIfFeed(); }
 
   function renderPanel() {
     if (!wrapEl) return;
     for (const el of Array.from(wrapEl.querySelectorAll('.sheet,.scrim'))) el.remove();
-    if (!panelOpen && !checkInOpen) return;
+    if (!panelOpen && !checkInOpen && !fb) return;
     wrapEl.appendChild(h('div', { class: 'scrim', onclick: closePanel }));
     const sheet = h('div', { class: 'sheet', role: 'dialog', 'aria-label': 'Mindful Feed' });
     if (checkInOpen) { renderCheckIn(sheet); wrapEl.appendChild(sheet); return; }
+    if (fb) { renderFeedback(sheet); wrapEl.appendChild(sheet); return; }
     sheet.appendChild(h('div', { class: 'top' },
       h('h2', { text: '🧭 Mindful Feed' }),
       h('div', null,
         h('button', { class: 'btn', onclick: () => { S.enabled = !S.enabled; saveSettings(); reloadIfFeed(true); renderPanel(); } }, S.enabled ? 'Pause' : 'Resume'),
         h('button', { class: 'x', 'aria-label': 'Close', onclick: closePanel }, '×'))));
-    const tabs = [['now', 'Right now'], ['shelf', 'Shelf (' + shelf.length + ')'], ['filters', 'Filters'], ['log', 'Filtered'], ['ai', 'AI']];
+    const tabs = [['now', 'Right now'], ['teach', '🎓 Teach'], ['shelf', 'Shelf (' + shelf.length + ')'], ['filters', 'Filters'], ['log', 'Filtered'], ['ai', 'AI']];
     sheet.appendChild(h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (activeTab === k ? ' on' : ''), onclick: () => { activeTab = k; renderPanel(); } }, l))));
     const body = h('div');
-    ({ now: renderNow, shelf: renderShelf, filters: renderFilters, log: renderLog, ai: renderAi })[activeTab](body);
+    ({ now: renderNow, teach: renderTeach, shelf: renderShelf, filters: renderFilters, log: renderLog, ai: renderAi })[activeTab](body);
     sheet.appendChild(body);
     wrapEl.appendChild(sheet);
   }
@@ -687,11 +720,30 @@
     saveSettings();
   }
 
+  function finishCheckIn() { checkInOpen = false; checkInAsk = null; panelOpen = false; renderPanel(); reloadIfFeed(true); }
+
+  function askChoices(presetKey, onPick) {
+    const ask = P.PRESETS[presetKey].ask;
+    return h('div', { class: 'choice' }, ask.options.map(o =>
+      h('button', { class: 'preset', onclick: () => { Object.assign(S, o.set); saveSettings(); onPick(); } }, o.label, h('small', { text: o.hint }))));
+  }
+
   function renderCheckIn(sheet) {
+    if (checkInAsk) {
+      const pr = P.PRESETS[checkInAsk];
+      sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: pr.emoji + ' ' + pr.ask.question }),
+        h('button', { class: 'x', 'aria-label': 'Back', onclick: () => { checkInAsk = null; renderPanel(); } }, '‹')));
+      sheet.appendChild(askChoices(checkInAsk, finishCheckIn));
+      return;
+    }
     sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: 'How are you right now?' }),
       h('button', { class: 'x', 'aria-label': 'Close', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); closePanel(); } }, '×')));
     sheet.appendChild(h('p', { class: 'note', text: 'Your feed will only show what fits. Nothing informational gets lost – it waits on your Later shelf.' }));
-    sheet.appendChild(presetGrid(k => { applyPreset(k); checkInOpen = false; panelOpen = false; renderPanel(); reloadIfFeed(true); }));
+    sheet.appendChild(presetGrid(k => {
+      applyPreset(k);
+      if (P.PRESETS[k].ask) { checkInAsk = k; renderPanel(); return; }
+      finishCheckIn();
+    }));
     sheet.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); checkInOpen = false; openPanel('now'); } }, 'Fine-tune instead')));
   }
 
@@ -723,15 +775,25 @@
     const budgetLeft = Math.max(0, (S.infoBudget || 0) - infoUsed());
     b.appendChild(h('p', { class: 'big' }, currentPreset ? (P.PRESETS[currentPreset].emoji + ' ' + P.PRESETS[currentPreset].label) : 'Custom mix'));
     b.appendChild(presetGrid(k => { applyPreset(k); renderPanel(); markDirty(); }));
+    if (currentPreset && P.PRESETS[currentPreset].ask) {
+      b.appendChild(h('h3', { text: P.PRESETS[currentPreset].ask.question }));
+      b.appendChild(askChoices(currentPreset, () => { renderPanel(); markDirty(); }));
+    }
     b.appendChild(h('h3', { text: 'Fine-tune' }));
     const needSel = h('select', { onchange: e => setAndRefresh('need', e.target.value) },
       Object.keys(P.NEED_LABELS).map(k => { const o = h('option', { value: k }, P.NEED_LABELS[k]); if (S.need === k) o.selected = true; return o; }));
     b.appendChild(row('What do you need?', 'Psychological need the feed should serve', needSel));
-    b.appendChild(row('Mental capacity', 'How demanding videos may be', seg([[0, 'Relaxed'], [1, 'In-between'], [2, 'Strenuous']], S.maxLoad, v => setAndRefresh('maxLoad', v))));
+    const loads = P.loadsOf(S);
+    b.appendChild(row('Show videos that are', 'Pick one or more – e.g. Focused hides easy videos',
+      h('div', { class: 'seg' }, [[0, 'Easy'], [1, 'Medium'], [2, 'Demanding']].map(([v, l]) => h('button', { class: loads.includes(v) ? 'on' : '', onclick: () => {
+        const set = new Set(loads); set.has(v) ? set.delete(v) : set.add(v);
+        if (set.size) setAndRefresh('loads', Array.from(set).sort());
+      } }, l)))));
     b.appendChild(row('Tone', null, seg([['light', 'Light-hearted'], ['balanced', 'Balanced'], ['any', 'Anything']], S.tone, v => setAndRefresh('tone', v))));
-    b.appendChild(row('Politics', null, seg([['hide', 'Apolitical'], ['show', 'Political ok']], S.politics, v => setAndRefresh('politics', v))));
+    b.appendChild(row('Politics', null, seg([['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']], S.politics, v => setAndRefresh('politics', v))));
     b.appendChild(row('News', null, seg([['hide', 'No news'], ['show', 'News ok']], S.news, v => setAndRefresh('news', v))));
     b.appendChild(row('Distressing topics', 'Crime, war, disasters, horror', seg([['hide', 'Hide'], ['show', 'Allow']], S.distressing, v => setAndRefresh('distressing', v))));
+    b.appendChild(row('Only clear matches', 'Hide videos that don\'t clearly fit the mode (also ones we can\'t classify)', check('strictNeed', markDirty)));
     b.appendChild(h('h3', { text: 'Informational videos' }));
     b.appendChild(h('p', { class: 'note' }, 'Today: ' + infoUsed() + ' of ' + S.infoBudget + ' watched. ' +
       (budgetLeft > 0 ? 'You have room for ' + budgetLeft + ' more.' : "That's enough input for now – new ones wait on your shelf.")));
@@ -742,7 +804,7 @@
 
   function shelfCard(x, primary) {
     return h('div', { class: 'card' },
-      h('img', { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(x.id) + '/mqdefault.jpg', alt: '', loading: 'lazy' }),
+      h('img', { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(x.id) + '/mqdefault.jpg', alt: '', loading: 'lazy', onerror: e => { e.target.style.visibility = 'hidden'; } }),
       h('div', null,
         h('div', { class: 't', text: x.title || x.id }),
         h('div', { class: 'm', text: [x.channel, x.durationText, x.source === 'saved' ? 'saved by you' : 'caught for you', ago(x.addedAt)].filter(Boolean).join(' · ') }),
@@ -807,7 +869,6 @@
     b.appendChild(row('Block addictive patterns', 'Clickbait, rage bait, challenges, pranks', check('blockAddictive', markDirty)));
     b.appendChild(row('Hide Shorts', 'Feed shelves and the Shorts tab', check('hideShorts', markDirty)));
     b.appendChild(row('Hide ad cards in feeds', 'Player ads are not touched', check('hideAds', markDirty)));
-    b.appendChild(row('Strict mode', 'Hide videos we can\'t classify when a specific need is chosen', check('strictNeed', markDirty)));
     b.appendChild(h('h3', { text: 'While watching' }));
     b.appendChild(row('No recommendations under videos', 'Also removes suggestions next to comments', check('hideRelated')));
     b.appendChild(row('No end screens / info cards', null, check('hideEndscreens')));
@@ -848,9 +909,159 @@
       b.appendChild(h('div', { class: 'log' },
         h('a', { href: '/watch?v=' + encodeURIComponent(x.id), style: 'color:inherit' }, x.title || x.id),
         h('div', { class: 'r', text: (x.channel ? x.channel + ' · ' : '') + (x.action === 'shelf' ? '📥 ' : '🚫 ') + x.reason }),
-        x.channel ? h('button', { class: 'tchip', onclick: () => { S.channelsTrusted = Array.from(new Set((S.channelsTrusted || []).concat([x.channel]))); saveSettings(); renderPanel(); } }, 'Trust channel') : null));
+        h('div', { class: 'chips', style: 'margin-top:4px' },
+          h('button', { class: 'tchip', onclick: () => { submitFeedback(x, true, [], false); x.reason = '👍 you said it fits – shown after reload'; renderPanel(); } }, '👍 Should be shown'),
+          x.channel ? h('button', { class: 'tchip', onclick: () => { S.channelsTrusted = Array.from(new Set((S.channelsTrusted || []).concat([x.channel]))); saveSettings(); markDirty(); renderPanel(); } }, 'Trust channel') : null)));
     }
     if (items.length) b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => { filterLog = []; persistSoon(); renderPanel(); } }, 'Clear log')));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Feedback & training (works offline; with an API key it also guides Claude)
+  // ---------------------------------------------------------------------------
+  function describe(meta) {
+    const learned = Lr.judge(learner, meta, modeKey());
+    const p = Lr.adjustProfile(profileFor(meta), learned);
+    const needs = (p.needs || []).map(n => (NEED_ICON[n] || '') + ' ' + n).join(', ');
+    return [needs || 'no clear need', LOAD_LABEL[p.load], p.tone, p.political ? 'political' : null].filter(Boolean).join(' · ');
+  }
+  function currentDecision(meta) {
+    const v = verdicts.get(meta.id);
+    const d = v ? decisionFor(v.meta, v.context).d : decisionFor(meta, 'home').d;
+    return d.action === 'show' ? 'shown' : (d.action === 'shelf' ? 'on your shelf' : 'hidden') + ' – ' + d.reason;
+  }
+  function videoCard(meta, lines) {
+    return h('div', { class: 'card' },
+      h('img', { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(meta.id) + '/mqdefault.jpg', alt: '', loading: 'lazy', onerror: e => { e.target.style.visibility = 'hidden'; } }),
+      h('div', null,
+        h('div', { class: 't', text: meta.title || meta.id }),
+        (lines || []).filter(Boolean).map(t => h('div', { class: 'm', text: t }))));
+  }
+
+  function openFeedback(meta) {
+    if (!meta || !meta.id) return;
+    fb = { meta, step: 'ask', reasons: new Set(), blockChannel: false };
+    renderPanel();
+  }
+
+  function submitFeedback(meta, fits, reasons, blockChannel) {
+    Lr.feedback(learner, meta, modeKey(), fits, reasons, modeLabel());
+    if (blockChannel && meta.channel) {
+      S.channelsBlocked = Array.from(new Set((S.channelsBlocked || []).concat([meta.channel])));
+      saveSettings();
+    }
+    saveLearner();
+    // "Doesn't fit" is applied to the page right away; "fits" may need the
+    // feed to be fetched again (the video may already have been removed).
+    if (fits) markDirty();
+    queueScan();
+  }
+
+  function reasonChips(state) {
+    return h('div', { class: 'chips' }, Object.keys(Lr.REASONS).map(k =>
+      h('button', { class: 'tchip' + (state.reasons.has(k) ? ' on' : ''), onclick: () => { state.reasons.has(k) ? state.reasons.delete(k) : state.reasons.add(k); renderPanel(); } }, Lr.REASONS[k].label)));
+  }
+
+  function renderFeedback(sheet) {
+    const m = fb.meta;
+    sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: 'Does this fit right now?' }),
+      h('button', { class: 'x', 'aria-label': 'Close', onclick: () => { fb = null; renderPanel(); if (dirty) reloadIfFeed(); } }, '×')));
+    sheet.appendChild(h('p', { class: 'note', text: 'Mode: ' + modeLabel() }));
+    sheet.appendChild(videoCard(m, [m.channel, 'Labels: ' + describe(m), 'Currently ' + currentDecision(m)]));
+    if (fb.step === 'ask') {
+      sheet.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { submitFeedback(m, true, [], false); fb.step = 'done'; fb.fits = true; renderPanel(); } }, '✅ Fits this mode'),
+        h('button', { class: 'btn', onclick: () => { fb.step = 'why'; renderPanel(); } }, "❌ Doesn't fit")));
+      sheet.appendChild(h('p', { class: 'note', text: 'Your answer is learned on this device. Similar videos (shared words or the same channel) will follow it – no API key needed.' }));
+    } else if (fb.step === 'why') {
+      sheet.appendChild(h('h3', { text: 'Why not? (optional – helps it learn faster)' }));
+      sheet.appendChild(reasonChips(fb));
+      if (m.channel) {
+        const c = h('input', { type: 'checkbox' }); c.checked = fb.blockChannel;
+        c.addEventListener('change', () => { fb.blockChannel = c.checked; });
+        sheet.appendChild(row('Never show ' + m.channel, null, c));
+      }
+      sheet.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => {
+        submitFeedback(m, false, Array.from(fb.reasons), fb.blockChannel); fb.step = 'done'; fb.fits = false; renderPanel();
+      } }, 'Save')));
+    } else {
+      sheet.appendChild(h('p', { class: 'big', text: fb.fits ? '✓ Got it – videos like this fit "' + modeLabel() + '".' : '✓ Got it – videos like this stay out of "' + modeLabel() + '".' }));
+      sheet.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { fb = null; renderPanel(); if (dirty) reloadIfFeed(); } }, 'Done'),
+        h('button', { class: 'btn', onclick: () => { fb = null; teach = null; openPanel('teach'); } }, '🎓 Teach more')));
+    }
+  }
+
+  function buildTeachQueue() {
+    const mode = modeKey();
+    const seen = new Set();
+    const shown = [], hidden = [];
+    for (const v of verdicts.values()) {
+      const m = v.meta;
+      if (!m || !m.id || !m.title || m.isShort || seen.has(m.id)) continue;
+      if ((learner.videos[m.id] || {})[mode] !== undefined) continue;
+      seen.add(m.id);
+      (decisionFor(m, v.context).d.action === 'show' ? shown : hidden).push(m);
+    }
+    for (const x of filterLog.slice().reverse()) {
+      if (!x.id || !x.title || seen.has(x.id) || (learner.videos[x.id] || {})[mode] !== undefined) continue;
+      seen.add(x.id); hidden.push(x);
+    }
+    // Alternate: what you see (are these right?) and what was held back (should any be shown?).
+    const q = [];
+    while (q.length < 10 && (shown.length || hidden.length)) {
+      if (shown.length) q.push(shown.shift());
+      if (hidden.length && q.length < 10) q.push(hidden.shift());
+    }
+    return q;
+  }
+
+  function renderTeach(b) {
+    if (!teach) {
+      b.appendChild(h('p', { class: 'big', text: 'Teach Mindful Feed what fits you' }));
+      b.appendChild(h('p', { class: 'note', text: 'You\'ll see up to 10 videos from your feed – some that were shown, some that were held back – and say whether each fits "' + modeLabel() + '". Everything is learned on this device, no API key needed. With an API key, your answers also guide Claude\'s labels.' }));
+      b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { teach = { queue: buildTeachQueue(), i: 0, step: 'ask', reasons: new Set(), answered: 0 }; renderPanel(); } }, 'Start')));
+      b.appendChild(h('h3', { text: 'What I\'ve learned' }));
+      b.appendChild(h('p', { class: 'note', text: learner.count + ' answers so far.' }));
+      const top = Lr.top(learner.modes[modeKey()], 10);
+      if (top.length) {
+        b.appendChild(h('p', { class: 'note', text: 'For "' + (P.NEED_LABELS[modeKey()] || modeKey()) + '":' }));
+        b.appendChild(h('div', { class: 'chips' }, top.map(t => h('span', { class: 'pill', text: (t.weight > 0 ? '👍 ' : '👎 ') + t.feature }))));
+      }
+      for (const dim of Object.keys(learner.dims)) {
+        const tops = Lr.top(learner.dims[dim], 6).filter(t => t.weight > 0);
+        if (!tops.length) continue;
+        b.appendChild(h('p', { class: 'note', text: 'Feels ' + dim + ' to you:' }));
+        b.appendChild(h('div', { class: 'chips' }, tops.map(t => h('span', { class: 'pill', text: t.feature }))));
+      }
+      if (learner.count) b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => {
+        if (confirm('Forget everything Mindful Feed has learned from your answers?')) { learner = Lr.empty(); saveLearner(); markDirty(); renderPanel(); }
+      } }, 'Reset what I learned')));
+      return;
+    }
+    const t = teach;
+    if (t.i >= t.queue.length) {
+      b.appendChild(h('p', { class: 'big', text: t.queue.length ? '✓ Thanks – ' + t.answered + ' answers learned.' : 'Nothing new to rate yet.' }));
+      b.appendChild(h('p', { class: 'note', text: t.queue.length ? 'Your feed now follows them. Similar videos will be treated the same way.' : 'Scroll your feed a bit (or switch modes), then come back.' }));
+      b.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { teach = null; markDirty(); closePanel(); } }, 'Apply to feed'),
+        h('button', { class: 'btn', onclick: () => { teach = null; renderPanel(); } }, 'Back')));
+      return;
+    }
+    const m = t.queue[t.i];
+    const next = () => { t.i++; t.step = 'ask'; t.reasons = new Set(); renderPanel(); };
+    b.appendChild(h('p', { class: 'progress', text: (t.i + 1) + ' / ' + t.queue.length + ' · mode: ' + modeLabel() }));
+    b.appendChild(videoCard(m, [m.channel, 'Labels: ' + describe(m), 'Currently ' + currentDecision(m)]));
+    if (t.step === 'ask') {
+      b.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { submitFeedback(m, true, [], false); t.answered++; next(); } }, '✅ Fits'),
+        h('button', { class: 'btn', onclick: () => { t.step = 'why'; renderPanel(); } }, "❌ Doesn't fit"),
+        h('button', { class: 'btn', onclick: next }, 'Skip')));
+    } else {
+      b.appendChild(h('h3', { text: 'Why not? (optional)' }));
+      b.appendChild(reasonChips(t));
+      b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { submitFeedback(m, false, Array.from(t.reasons), false); t.answered++; next(); } }, 'Next')));
+    }
   }
 
   function renderAi(b) {

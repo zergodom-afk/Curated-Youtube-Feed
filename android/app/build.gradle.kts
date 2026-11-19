@@ -6,7 +6,7 @@ plugins {
 // The filtering logic lives in ../../core (shared with the userscript and the
 // tests). Bundle it into one asset so the app always ships the current version.
 val coreDir = rootProject.layout.projectDirectory.dir("../core")
-val coreFiles = listOf("classifier.js", "extractor.js", "policy.js", "curator.js")
+val coreFiles = listOf("classifier.js", "extractor.js", "policy.js", "learner.js", "curator.js")
 val generatedAssets = layout.buildDirectory.dir("generated/mindfulAssets")
 
 val bundleCore by tasks.registering {

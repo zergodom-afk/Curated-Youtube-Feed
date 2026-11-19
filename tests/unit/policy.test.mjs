@@ -42,10 +42,56 @@ test('info budget: second informational video goes to the shelf', () => {
   assert.match(d.reason, /today/);
 });
 
-test('focused: political allowed, deep content allowed', () => {
-  const s = settings('focused', { infoBudget: 5 });
+const focusedVariant = i => Object.assign({}, P.PRESETS.focused.ask.options[i].set, { infoBudget: 5 });
+
+test('focused "both": political allowed, deep content allowed', () => {
+  const s = settings('focused', focusedVariant(2));
   assert.equal(run('Parliament debate on climate policy – analysis', s).action, 'show');
   assert.equal(run('Full course: linear algebra lecture', s, {}, { durationText: '3:00:00' }).action, 'show');
+});
+
+test('focused "apolitical": politics hidden, science shown', () => {
+  const s = settings('focused', focusedVariant(0));
+  assert.equal(run('Parliament debate on climate policy – analysis', s).action, 'hide');
+  assert.equal(run('Full course: linear algebra lecture', s, {}, { durationText: '3:00:00' }).action, 'show');
+});
+
+test('focused "only political": non-political learning hidden', () => {
+  const s = settings('focused', focusedVariant(1));
+  assert.equal(run('Parliament debate on climate policy – analysis', s).action, 'show');
+  assert.match(run('Full course: linear algebra lecture', s, {}, { durationText: '3:00:00' }).reason, /not political/);
+});
+
+test('focused hides easy videos; drained hides medium ones', () => {
+  const f = settings('focused', focusedVariant(2));
+  const easy = run('3 Hours of Gentle Rain Sounds for Deep Sleep', f);
+  assert.equal(easy.action, 'hide');
+  const d = settings('drained');
+  assert.notEqual(run('Why do cats purr? Explained', d).action, 'show');
+});
+
+test('strict modes: unclassifiable videos are hidden, "unwinding" (any) keeps them', () => {
+  assert.equal(run('Untitled 47', settings('lowMotivation')).action, 'hide');
+  assert.equal(run('Untitled 47', settings('unwind')).action, 'show');
+});
+
+test('"the dangers of believing in nothing" is not shown in "need a lift"', () => {
+  assert.equal(run('The dangers of believing in nothing', settings('lowMotivation')).action, 'hide');
+});
+
+test('learned feedback: explicit verdicts and learned similarity override soft rules', () => {
+  const s = settings('lowMotivation');
+  assert.equal(run('Untitled 47', s, { learned: { explicit: 1, verdict: 'yes' } }).action, 'show');
+  assert.equal(run('Inspiring story: kindness changed a town', s, { learned: { explicit: -1, verdict: 'no' } }).action, 'hide');
+  assert.equal(run('Inspiring story: kindness changed a town', s, { learned: { verdict: 'no', score: -3 } }).action, 'hide');
+  assert.equal(run('Untitled 47', s, { learned: { verdict: 'yes', score: 3 } }).action, 'show');
+  // hard switches still win over learned similarity
+  assert.equal(run('Election results: what the president said', s, { learned: { verdict: 'yes', score: 3 } }).action, 'hide');
+});
+
+test('old settings with maxLoad migrate to loads', () => {
+  assert.deepEqual(P.merge({ maxLoad: 1 }).loads, [0, 1]);
+  assert.deepEqual(P.merge({ maxLoad: 0, loads: [2] }).loads, [2]);
 });
 
 test('search results are not filtered by mood (only hard blocks)', () => {
