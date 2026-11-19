@@ -721,6 +721,8 @@
     hidePosts: true,      // community posts – only shown when the "Posts" chip is selected or on a channel's posts tab
     hideAds: false,       // in-feed ad cards only; player ads are never touched
     strictNeed: true,     // only videos that clearly match the chosen need (unclassified ones are hidden)
+    includeNoMood: false, // also show videos you sorted into "fits no mood"
+    autoFill: true,       // keep fetching more from YouTube while the feed is nearly empty
     // ---- watch page ----
     hideRelated: true,
     hideEndscreens: true,
@@ -809,7 +811,7 @@
   function maxLoadOf(s) { return Math.max.apply(null, loadsOf(s)); }
 
   const NEED_LABELS = {
-    any: 'Anything that fits', relax: 'Relaxation', laugh: 'Laughter / fun', curious: 'Light curiosity',
+    any: 'Anything that fits', custom: 'Only what I teach it', relax: 'Relaxation', laugh: 'Laughter / fun', curious: 'Light curiosity',
     learn: 'Learning', create: 'Doing / making', inspire: 'Inspiration', comfort: 'Comfort / safety',
   };
 
@@ -863,6 +865,8 @@
 
     // Your own feedback on this exact video (for this mode) beats every rule below.
     const L = ctx.learned || null;
+    if (L && L.never) return { action: 'hide', reason: 'you chose never to show this' };
+    if (L && L.nomood && s.includeNoMood) return { action: 'show', reason: 'from your "fits no mood" pile' };
     if (L && L.explicit === 1) return { action: 'show', reason: 'you said this fits' };
     if (L && L.explicit === -1) return { action: 'hide', reason: "you said this doesn't fit this mode" };
 
@@ -1020,6 +1024,7 @@
   'use strict';
 
   const THRESHOLD = 2;
+  const NONE = '__none';   // learner key for the "fits no mood" pile
   const MAX_W = 6;
 
   const STOP = new Set((
@@ -1054,7 +1059,7 @@
   }
 
   function empty() {
-    return { v: 1, modes: {}, dims: {}, videos: {}, examples: [], count: 0 };
+    return { v: 2, modes: {}, dims: {}, videos: {}, examples: [], count: 0 };
   }
 
   function load(stored) {
@@ -1063,6 +1068,7 @@
       for (const k of ['modes', 'dims', 'videos']) if (stored[k] && typeof stored[k] === 'object') m[k] = stored[k];
       if (Array.isArray(stored.examples)) m.examples = stored.examples;
       m.count = stored.count || 0;
+      m.v = stored.v || 1;
     }
     return m;
   }
@@ -1103,18 +1109,23 @@
    * @param reasons array of REASONS keys (only meaningful when !fits)
    * @param modeLabel human label, stored with the example for the AI prompt
    */
-  function feedback(model, meta, mode, fits, reasons, modeLabel) {
+  function feedback(model, meta, mode, fits, reasons, modeLabel, weight) {
     reasons = (reasons || []).filter(r => REASONS[r]);
+    weight = weight == null ? 1 : weight;
     const feats = features(meta);
-    const prev = model.videos[meta.id] && model.videos[meta.id][mode];
-    const delta = fits ? 1 : -1;
-    // Undo a previous opposite verdict on the same video before applying.
-    if (prev !== undefined && prev !== delta) bump(model.modes[mode] = model.modes[mode] || {}, feats, -prev);
-    if (prev !== delta) bump(model.modes[mode] = model.modes[mode] || {}, feats, delta);
-
     const v = model.videos[meta.id] = model.videos[meta.id] || {};
+    v.w = v.w || {};
+    const prev = v[mode];
+    const prevW = v.w[mode] == null ? 1 : v.w[mode];
+    const delta = fits ? 1 : -1;
+    const map = model.modes[mode] = model.modes[mode] || {};
+    // Replace a previous answer on the same video instead of stacking it.
+    if (prev !== undefined) bump(map, feats, -prev * prevW);
+    bump(map, feats, delta * weight);
     v[mode] = delta;
+    v.w[mode] = weight;
     v.at = Date.now();
+    if (fits) delete v.nomood;
     if (!fits && reasons.length) {
       v.reasons = Array.from(new Set((v.reasons || []).concat(reasons)));
       for (const r of reasons) {
@@ -1122,15 +1133,79 @@
         if (dim) bump(model.dims[dim] = model.dims[dim] || {}, feats, 1);
       }
     }
-    if (fits) {
-      // A video that fits a calm/light mode was evidently not "heavy"/"clickbait" for this user.
-      if (['relax', 'comfort', 'laugh', 'inspire'].includes(mode)) bump(model.dims.heavy = model.dims.heavy || {}, feats, -0.5);
+    if (fits && weight >= 1) {
+      // A video that fits a calm/light mood was evidently not "heavy" for this user.
+      if (CALM.test(mode)) bump(model.dims.heavy = model.dims.heavy || {}, feats, -0.5);
     }
-    model.examples = model.examples.filter(e => !(e.id === meta.id && e.mode === mode));
-    model.examples.push({ id: meta.id, title: meta.title || '', channel: meta.channel || '', mode, modeLabel: modeLabel || mode, fits: !!fits, reasons, at: Date.now() });
-    if (model.examples.length > 200) model.examples = model.examples.slice(-200);
-    model.count++;
+    if (weight >= 1) {
+      model.examples = model.examples.filter(e => !(e.id === meta.id && e.mode === mode));
+      model.examples.push({ id: meta.id, title: meta.title || '', channel: meta.channel || '', mode, modeLabel: modeLabel || mode, fits: !!fits, reasons, at: Date.now() });
+      if (model.examples.length > 200) model.examples = model.examples.slice(-200);
+      model.count++;
+    }
     prune(model);
+    return model;
+  }
+  const CALM = /^(relax|comfort|laugh|inspire|drained|anxious|sleep|laugh|lowMotivation|unwind)$/;
+
+  /**
+   * "Sort my feed": the video fits exactly the selected moods. Unselected moods
+   * get a weaker "doesn't fit" (they weren't actively rejected).
+   * @param moods  [{key,label}] all moods the user can pick from
+   */
+  function sortVideo(model, meta, selectedKeys, moods) {
+    const sel = new Set(selectedKeys || []);
+    for (const m of moods) feedback(model, meta, m.key, sel.has(m.key), [], m.label, sel.has(m.key) ? 1 : 0.5);
+    const v = model.videos[meta.id];
+    delete v.nomood; delete v.never;
+    if (v[NONE] !== undefined) feedback(model, meta, NONE, false, [], 'fits no mood', 1);
+    v.sorted = Date.now();
+    model.count++;
+    return model;
+  }
+
+  /** "Fits no mood": out of every mood, collected in a pile you can build a new mood from. */
+  function markNoMood(model, meta, moods) {
+    for (const m of moods) feedback(model, meta, m.key, false, [], m.label, 0.5);
+    feedback(model, meta, NONE, true, [], 'fits no mood', 1);
+    const v = model.videos[meta.id];
+    v.nomood = { title: meta.title || '', channel: meta.channel || '', durationText: meta.durationText || null };
+    v.sorted = Date.now();
+    return model;
+  }
+
+  /** "Never show": this video never appears, in any mood. */
+  function markNever(model, meta) {
+    const v = model.videos[meta.id] = model.videos[meta.id] || {};
+    v.never = true; v.at = v.sorted = Date.now();
+    delete v.nomood;
+    model.count++;
+    return model;
+  }
+
+  /** Videos in the "fits no mood" pile (newest first). */
+  function noMoodVideos(model) {
+    return Object.keys(model.videos)
+      .filter(id => model.videos[id].nomood)
+      .map(id => Object.assign({ id }, model.videos[id].nomood, { at: model.videos[id].sorted || model.videos[id].at }))
+      .sort((a, b) => b.at - a.at);
+  }
+
+  function isSorted(model, id) { const v = model.videos[id]; return !!(v && (v.sorted || v.never)); }
+
+  /** v1 learned per need ("relax"); v2 learns per mood ("drained", "sleep", custom moods). */
+  function migrateToMoods(model, presets) {
+    if (model.v >= 2) return model;
+    for (const key of Object.keys(presets)) {
+      const need = presets[key].set && presets[key].set.need;
+      if (!need || !model.modes[need] || model.modes[key]) continue;
+      model.modes[key] = Object.assign({}, model.modes[need]);
+      for (const id of Object.keys(model.videos)) {
+        const v = model.videos[id];
+        if (v[need] !== undefined && v[key] === undefined) v[key] = v[need];
+      }
+    }
+    model.v = 2;
     return model;
   }
 
@@ -1158,10 +1233,11 @@
     else if (s <= -THRESHOLD) verdict = 'no';
     const dims = {};
     for (const name of Object.keys(model.dims)) {
-      dims[name] = score(model.dims[name], feats) >= THRESHOLD || (v.reasons || []).some(r => REASONS[r] && REASONS[r].dim === name);
+      dims[name] = score(model.dims[name], feats) >= THRESHOLD;
     }
     for (const r of v.reasons || []) if (REASONS[r] && REASONS[r].dim) dims[REASONS[r].dim] = true;
-    return { explicit, score: s, verdict, dims, reasons: v.reasons || [] };
+    const nomood = !!v.nomood || (v[NONE] === undefined && !v.sorted && score(model.modes[NONE], feats) >= THRESHOLD);
+    return { explicit, score: s, verdict, dims, reasons: v.reasons || [], never: !!v.never, nomood };
   }
 
   /** Apply learned dimensions to a classifier profile (returns a new profile). */
@@ -1192,7 +1268,10 @@
     return model.examples.slice(-(n || 40)).map(e => ({ title: e.title, channel: e.channel, mode: e.modeLabel, fits: e.fits, reasons: e.reasons.map(r => REASONS[r] ? REASONS[r].label.replace(/^\S+\s/, '') : r) }));
   }
 
-  root.MindfulLearner = { features, empty, load, feedback, judge, adjustProfile, top, examplesForAi, REASONS, THRESHOLD };
+  root.MindfulLearner = {
+    features, empty, load, feedback, judge, adjustProfile, top, examplesForAi, sortVideo, markNoMood, markNever,
+    noMoodVideos, isSorted, migrateToMoods, REASONS, THRESHOLD, NONE,
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulLearner;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
@@ -1249,10 +1328,25 @@
   let currentPreset = store.get('preset', null);
   let learner = Lr.load(store.get('learner', null));
   function saveLearner() { store.set('learner', learner); }
-  /** Feedback is learned per need (Drained & Sleep share "relax", all Focused variants share "learn"). */
-  function modeKey() { return S.need; }
+  if (learner.v < 2) { Lr.migrateToMoods(learner, P.PRESETS); saveLearner(); }
+
+  // Moods = built-in presets + moods you created yourself.
+  let customMoods = store.get('moods', []);
+  function saveMoods() { store.set('moods', customMoods); }
+  function allMoods() {
+    const o = {};
+    for (const k of Object.keys(P.PRESETS)) o[k] = P.PRESETS[k];
+    for (const m of customMoods) o[m.id] = m;
+    return o;
+  }
+  function moodList() {
+    const all = allMoods();
+    return Object.keys(all).map(k => ({ key: k, label: all[k].emoji + ' ' + all[k].label }));
+  }
+  /** Feedback is learned per mood; without a mood (manual fine-tuning) per need. */
+  function modeKey() { return currentPreset && allMoods()[currentPreset] ? currentPreset : 'need:' + S.need; }
   function modeLabel() {
-    const pr = currentPreset && P.PRESETS[currentPreset];
+    const pr = currentPreset && allMoods()[currentPreset];
     return pr ? pr.emoji + ' ' + pr.label : (P.NEED_LABELS[S.need] || S.need);
   }
 
@@ -1270,7 +1364,11 @@
   let pageShown = new Set(), pageHeld = new Set(), statEl = null;
   let checkInAsk = null;                       // preset key whose follow-up question is showing
   let fb = null;                               // open feedback sheet: {meta, step, reasons:Set, blockChannel}
-  let teach = null;                            // wizard: {queue, i, step, reasons:Set, answered}
+  let teach = null;                            // Teach tab state: {view:'home'|'quick'|'sort'|'editor', …}
+  let loadState = null, autoFillRounds = 0, autoFillTimer = null, lastUserInput = 0;
+  for (const ev of ['touchstart', 'wheel', 'keydown', 'mousedown']) {
+    window.addEventListener(ev, () => { lastUserInput = Date.now(); }, { capture: true, passive: true });
+  }
 
   function todayKey() { const d = new Date(); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
   function refreshInfoWindow() {
@@ -1685,7 +1783,7 @@
   function queueScan() {
     if (scanQueued) return;
     scanQueued = true;
-    setTimeout(() => { scanQueued = false; try { scanDom(); } catch (e) { console.warn('[MindfulFeed] scan', e); } }, 120);
+    setTimeout(() => { scanQueued = false; try { scanDom(); } catch (e) { console.warn('[MindfulFeed] scan', e); } maybeAutoFill(); }, 120);
   }
 
   // ---------------------------------------------------------------------------
@@ -1698,7 +1796,7 @@
     if (location.pathname !== lastPath) {
       // A different page starts with the "All" chip and a fresh count.
       lastPath = location.pathname;
-      postsChip = false; pageShown.clear(); pageHeld.clear(); updateStat();
+      postsChip = false; pageShown.clear(); pageHeld.clear(); autoFillRounds = 0; updateStat();
     }
     updatePostsClass();
     updateWatchChip();
@@ -1858,7 +1956,7 @@
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;flex-shrink:0}
   .seg button{border:none;background:transparent;color:var(--fg);padding:5px 10px;font:inherit;font-size:12.5px;cursor:pointer}
   .seg button.on{background:var(--acc);color:#fff}
-  select,input[type=number],textarea{font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:5px 8px}
+  select,input[type=number],input[type=text],textarea{font:inherit;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:8px;padding:5px 8px}
   textarea{width:100%;min-height:54px;resize:vertical}
   input[type=checkbox]{width:20px;height:20px;accent-color:var(--acc)}
   .chips{display:flex;flex-wrap:wrap;gap:6px}
@@ -1959,15 +2057,16 @@
   }
 
   function presetGrid(onPick) {
-    return h('div', { class: 'grid' }, Object.keys(P.PRESETS).map(k => {
-      const pr = P.PRESETS[k];
+    const all = allMoods();
+    return h('div', { class: 'grid' }, Object.keys(all).map(k => {
+      const pr = all[k];
       return h('button', { class: 'preset' + (currentPreset === k ? ' on' : ''), onclick: () => onPick(k) },
         h('b', { text: pr.emoji }), pr.label, h('small', { text: pr.hint }));
     }));
   }
 
   function applyPreset(k) {
-    Object.assign(S, P.PRESETS[k].set);
+    Object.assign(S, { includeNoMood: false }, allMoods()[k].set);
     currentPreset = k; store.set('preset', k);
     lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn);
     saveSettings();
@@ -1976,14 +2075,14 @@
   function finishCheckIn() { checkInOpen = false; checkInAsk = null; panelOpen = false; renderPanel(); reloadIfFeed(true); }
 
   function askChoices(presetKey, onPick) {
-    const ask = P.PRESETS[presetKey].ask;
+    const ask = allMoods()[presetKey].ask;
     return h('div', { class: 'choice' }, ask.options.map(o =>
       h('button', { class: 'preset', onclick: () => { Object.assign(S, o.set); saveSettings(); onPick(); } }, o.label, h('small', { text: o.hint }))));
   }
 
   function renderCheckIn(sheet) {
     if (checkInAsk) {
-      const pr = P.PRESETS[checkInAsk];
+      const pr = allMoods()[checkInAsk];
       sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: pr.emoji + ' ' + pr.ask.question }),
         h('button', { class: 'x', 'aria-label': 'Back', onclick: () => { checkInAsk = null; renderPanel(); } }, '‹')));
       sheet.appendChild(askChoices(checkInAsk, finishCheckIn));
@@ -1994,7 +2093,7 @@
     sheet.appendChild(h('p', { class: 'note', text: 'Your feed will only show what fits. Nothing informational gets lost – it waits on your Later shelf.' }));
     sheet.appendChild(presetGrid(k => {
       applyPreset(k);
-      if (P.PRESETS[k].ask) { checkInAsk = k; renderPanel(); return; }
+      if (allMoods()[k].ask) { checkInAsk = k; renderPanel(); return; }
       finishCheckIn();
     }));
     sheet.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); checkInOpen = false; openPanel('now'); } }, 'Fine-tune instead')));
@@ -2026,10 +2125,14 @@
 
   function renderNow(b) {
     const budgetLeft = Math.max(0, (S.infoBudget || 0) - infoUsed());
-    b.appendChild(h('p', { class: 'big' }, currentPreset ? (P.PRESETS[currentPreset].emoji + ' ' + P.PRESETS[currentPreset].label) : 'Custom mix'));
+    const cur = currentPreset && allMoods()[currentPreset];
+    b.appendChild(h('p', { class: 'big' }, cur ? cur.emoji + ' ' + cur.label : 'Custom mix'));
     b.appendChild(presetGrid(k => { applyPreset(k); renderPanel(); markDirty(); }));
-    if (currentPreset && P.PRESETS[currentPreset].ask) {
-      b.appendChild(h('h3', { text: P.PRESETS[currentPreset].ask.question }));
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn', onclick: () => openEditor(null, 'now') }, '＋ New mood'),
+      cur && cur.custom ? h('button', { class: 'btn', onclick: () => openEditor(cur, 'now') }, '✎ Edit this mood') : null));
+    if (cur && cur.ask) {
+      b.appendChild(h('h3', { text: cur.ask.question }));
       b.appendChild(askChoices(currentPreset, () => { renderPanel(); markDirty(); }));
     }
     b.appendChild(h('h3', { text: 'Fine-tune' }));
@@ -2046,6 +2149,7 @@
     b.appendChild(row('Politics', null, seg([['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']], S.politics, v => setAndRefresh('politics', v))));
     b.appendChild(row('News', null, seg([['hide', 'No news'], ['show', 'News ok']], S.news, v => setAndRefresh('news', v))));
     b.appendChild(row('Distressing topics', 'Crime, war, disasters, horror', seg([['hide', 'Hide'], ['show', 'Allow']], S.distressing, v => setAndRefresh('distressing', v))));
+    b.appendChild(row('Also show "fits no mood" videos', 'Videos you sorted into the "fits no mood" pile (' + Lr.noMoodVideos(learner).length + ')', check('includeNoMood', markDirty)));
     b.appendChild(row('Only clear matches', 'Hide videos that don\'t clearly fit the mode (also ones we can\'t classify)', check('strictNeed', markDirty)));
     b.appendChild(h('h3', { text: 'Informational videos' }));
     b.appendChild(h('p', { class: 'note' }, 'Today: ' + infoUsed() + ' of ' + S.infoBudget + ' watched. ' +
@@ -2121,6 +2225,7 @@
     b.appendChild(row('Block parasocial videos', 'Vlogs, drama, reactions, “we need to talk”, streams', check('blockParasocial', markDirty)));
     b.appendChild(row('Block addictive patterns', 'Clickbait, rage bait, challenges, pranks', check('blockAddictive', markDirty)));
     b.appendChild(row('Hide Shorts', 'Feed shelves and the Shorts tab', check('hideShorts', markDirty)));
+    b.appendChild(row('Keep loading while the feed is nearly empty', 'Fetches more recommendations from YouTube in the background', check('autoFill')));
     b.appendChild(row('Hide community posts', 'Except when you pick the "Posts" chip above the feed, or on a channel\'s page', check('hidePosts', () => { updatePostsClass(); markDirty(); })));
     b.appendChild(row('Hide ad cards in feeds', 'Player ads are not touched', check('hideAds', markDirty)));
     b.appendChild(h('h3', { text: 'While watching' }));
@@ -2246,65 +2351,145 @@
     }
   }
 
-  function buildTeachQueue() {
-    const mode = modeKey();
-    const seen = new Set();
-    const shown = [], hidden = [];
+  // ---------------------------------------------------------------------------
+  // Loading more recommendations from YouTube (scrolls YouTube's own feed so
+  // it fetches its next page; everything new runs through the filter too)
+  // ---------------------------------------------------------------------------
+  function canLoadMore() { const c = pageContext(); return c === 'home' || c === 'subscriptions'; }
+
+  function loadMore(rounds, done) {
+    if (!canLoadMore() || (loadState && loadState.running)) { if (done) done(-1); return; }
+    const before = verdicts.size, y = window.scrollY, started = Date.now();
+    let i = 0;
+    loadState = { running: true, added: 0 };
+    const step = () => {
+      const el = document.scrollingElement || document.documentElement;
+      window.scrollTo(0, el.scrollHeight);
+      window.dispatchEvent(new Event('scroll'));
+      setTimeout(() => {
+        i++;
+        loadState.added = verdicts.size - before;
+        if (panelOpen && activeTab === 'teach') renderPanel(); // live "+N" while loading
+        if (i < rounds) return step();
+        if (lastUserInput < started) window.scrollTo(0, y); // don't yank the page if you were using it
+        loadState = { running: false, added: verdicts.size - before };
+        if (done) done(loadState.added);
+        if (panelOpen && activeTab === 'teach') renderPanel();
+      }, 1400);
+    };
+    step();
+  }
+
+  /** While the feed shows almost nothing, quietly ask YouTube for more (a few rounds per page). */
+  function maybeAutoFill() {
+    clearTimeout(autoFillTimer);
+    if (!S.autoFill || !S.enabled || !canLoadMore() || panelOpen || fb || checkInOpen) return;
+    if (pageShown.size >= 6 || autoFillRounds >= 6) return;
+    autoFillTimer = setTimeout(() => {
+      if (pageShown.size >= 6 || panelOpen || fb || (loadState && loadState.running)) return;
+      if (Date.now() - lastUserInput < 4000) return maybeAutoFill(); // wait until you pause
+      autoFillRounds++;
+      loadMore(1, () => maybeAutoFill());
+    }, 1800);
+  }
+
+  function loadMoreButton(after) {
+    if (!canLoadMore()) return h('p', { class: 'note', text: 'To load more videos, open your Home feed first.' });
+    if (loadState && loadState.running) return h('p', { class: 'note', text: '⏳ Loading more from YouTube… (+' + loadState.added + ')' });
+    return h('div', null,
+      loadState && loadState.added >= 0 ? h('p', { class: 'note', text: loadState.added ? '+' + loadState.added + ' new videos from YouTube.' : 'YouTube didn\'t send anything new this time – try again in a moment.' }) : null,
+      h('button', { class: 'btn', onclick: () => { loadMore(3, () => { if (after) after(); renderPanel(); }); renderPanel(); } }, '⤓ Load more videos from YouTube'));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Teach: quick check (current mood) · sort my feed (all moods) · mood editor
+  // ---------------------------------------------------------------------------
+  /** Every video YouTube offered on this page, in feed order (shown and held back). */
+  function candidates() {
+    const out = [], seen = new Set();
     for (const v of verdicts.values()) {
       const m = v.meta;
-      if (!m || !m.id || !m.title || m.isShort || seen.has(m.id)) continue;
-      if ((learner.videos[m.id] || {})[mode] !== undefined) continue;
-      seen.add(m.id);
-      (decisionFor(m, v.context).d.action === 'show' ? shown : hidden).push(m);
+      if (!m || !m.id || !m.title || m.isShort || m.kind !== 'video' || seen.has(m.id)) continue;
+      seen.add(m.id); out.push(Object.assign({ _ctx: v.context }, m));
     }
     for (const x of filterLog.slice().reverse()) {
-      if (!x.id || !x.title || seen.has(x.id) || (learner.videos[x.id] || {})[mode] !== undefined) continue;
-      seen.add(x.id); hidden.push(x);
+      if (!x.id || !x.title || seen.has(x.id)) continue;
+      seen.add(x.id); out.push(Object.assign({ kind: 'video', _ctx: 'home' }, x));
+    }
+    return out;
+  }
+
+  function buildQuickQueue(asked, limit) {
+    const mode = modeKey();
+    const shown = [], hidden = [];
+    for (const m of candidates()) {
+      if (asked.has(m.id) || (learner.videos[m.id] || {})[mode] !== undefined || (learner.videos[m.id] || {}).never) continue;
+      (decisionFor(m, m._ctx).d.action === 'show' ? shown : hidden).push(m);
     }
     // Alternate: what you see (are these right?) and what was held back (should any be shown?).
     const q = [];
-    while (q.length < 10 && (shown.length || hidden.length)) {
+    while (q.length < limit && (shown.length || hidden.length)) {
       if (shown.length) q.push(shown.shift());
-      if (hidden.length && q.length < 10) q.push(hidden.shift());
+      if (hidden.length && q.length < limit) q.push(hidden.shift());
     }
     return q;
   }
 
+  function sortQueue(t) { return candidates().filter(m => !Lr.isSorted(learner, m.id) && !t.skipped.has(m.id)); }
+
   function renderTeach(b) {
-    if (!teach) {
-      b.appendChild(h('p', { class: 'big', text: 'Teach Mindful Feed what fits you' }));
-      b.appendChild(h('p', { class: 'note', text: 'You\'ll see up to 10 videos from your feed – some that were shown, some that were held back – and say whether each fits "' + modeLabel() + '". Everything is learned on this device, no API key needed. With an API key, your answers also guide Claude\'s labels.' }));
-      b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { teach = { queue: buildTeachQueue(), i: 0, step: 'ask', reasons: new Set(), answered: 0 }; renderPanel(); } }, 'Start')));
-      b.appendChild(h('h3', { text: 'What I\'ve learned' }));
-      b.appendChild(h('p', { class: 'note', text: learner.count + ' answers so far.' }));
-      const top = Lr.top(learner.modes[modeKey()], 10);
-      if (top.length) {
-        b.appendChild(h('p', { class: 'note', text: 'For "' + (P.NEED_LABELS[modeKey()] || modeKey()) + '":' }));
-        b.appendChild(h('div', { class: 'chips' }, top.map(t => h('span', { class: 'pill', text: (t.weight > 0 ? '👍 ' : '👎 ') + t.feature }))));
-      }
-      for (const dim of Object.keys(learner.dims)) {
-        const tops = Lr.top(learner.dims[dim], 6).filter(t => t.weight > 0);
-        if (!tops.length) continue;
-        b.appendChild(h('p', { class: 'note', text: 'Feels ' + dim + ' to you:' }));
-        b.appendChild(h('div', { class: 'chips' }, tops.map(t => h('span', { class: 'pill', text: t.feature }))));
-      }
-      if (learner.count) b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => {
-        if (confirm('Forget everything Mindful Feed has learned from your answers?')) { learner = Lr.empty(); saveLearner(); markDirty(); renderPanel(); }
-      } }, 'Reset what I learned')));
-      return;
+    const t = teach || (teach = { view: 'home' });
+    ({ home: teachHome, quick: teachQuick, sort: teachSort, editor: teachEditor })[t.view](b, t);
+  }
+
+  function teachHome(b) {
+    b.appendChild(h('p', { class: 'big', text: 'Teach Mindful Feed what fits you' }));
+    b.appendChild(h('p', { class: 'note', text: 'Everything is learned on this device – no API key needed. Similar videos (shared words or the same channel) follow your answers. With an API key, your answers also guide Claude.' }));
+    b.appendChild(h('div', { class: 'choice' },
+      h('button', { class: 'preset', onclick: () => { teach = { view: 'quick', asked: new Set(), queue: [], i: 0, step: 'ask', reasons: new Set(), answered: 0 }; teach.queue = buildQuickQueue(teach.asked, 10); renderPanel(); } },
+        '✅ Quick check – ' + modeLabel(), h('small', { text: 'Yes / no for your current mood, 10 videos at a time.' })),
+      h('button', { class: 'preset', onclick: () => { teach = { view: 'sort', skipped: new Set(), selected: new Set(), step: 'pick', sorted: 0, blockChannel: false }; renderPanel(); } },
+        '🗂️ Sort my feed', h('small', { text: 'Every video YouTube offered: pick all moods it fits, "fits no mood", or "never show".' })),
+      h('button', { class: 'preset', onclick: () => openEditor(null, 'home') },
+        '＋ Create a mood', h('small', { text: 'Name it, set the basics, and fill it with videos from your "fits no mood" pile.' }))));
+    const pile = Lr.noMoodVideos(learner);
+    b.appendChild(h('p', { class: 'note', text: '"Fits no mood" pile: ' + pile.length + ' videos.' + (customMoods.length ? ' Your moods: ' + customMoods.map(m => m.emoji + ' ' + m.label).join(', ') + '.' : '') }));
+    if (customMoods.length) b.appendChild(h('div', { class: 'chips' }, customMoods.map(m => h('button', { class: 'tchip', onclick: () => openEditor(m, 'home') }, '✎ ' + m.emoji + ' ' + m.label))));
+    const det = h('details', null, h('summary', { text: 'What I\'ve learned (' + learner.count + ' answers)' }));
+    const top = Lr.top(learner.modes[modeKey()], 10);
+    if (top.length) {
+      det.appendChild(h('p', { class: 'note', text: 'For ' + modeLabel() + ':' }));
+      det.appendChild(h('div', { class: 'chips' }, top.map(x => h('span', { class: 'pill', text: (x.weight > 0 ? '👍 ' : '👎 ') + x.feature }))));
     }
-    const t = teach;
+    for (const dim of Object.keys(learner.dims)) {
+      const tops = Lr.top(learner.dims[dim], 6).filter(x => x.weight > 0);
+      if (!tops.length) continue;
+      det.appendChild(h('p', { class: 'note', text: 'Feels ' + dim + ' to you:' }));
+      det.appendChild(h('div', { class: 'chips' }, tops.map(x => h('span', { class: 'pill', text: x.feature }))));
+    }
+    if (learner.count) det.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn', onclick: () => {
+      if (confirm('Forget everything Mindful Feed has learned from your answers (including "never show" and the "fits no mood" pile)?')) { learner = Lr.empty(); saveLearner(); markDirty(); renderPanel(); }
+    } }, 'Reset what I learned')));
+    b.appendChild(det);
+  }
+
+  function backHome(t) { return h('button', { class: 'btn', onclick: () => { teach = { view: 'home' }; renderPanel(); } }, '‹ Back'); }
+
+  function teachQuick(b, t) {
     if (t.i >= t.queue.length) {
-      b.appendChild(h('p', { class: 'big', text: t.queue.length ? '✓ Thanks – ' + t.answered + ' answers learned.' : 'Nothing new to rate yet.' }));
-      b.appendChild(h('p', { class: 'note', text: t.queue.length ? 'Your feed now follows them. Similar videos will be treated the same way.' : 'Scroll your feed a bit (or switch modes), then come back.' }));
+      b.appendChild(h('p', { class: 'big', text: t.answered ? '✓ ' + t.answered + ' answers learned.' : 'Nothing new to check right now.' }));
+      const more = () => { t.queue = buildQuickQueue(t.asked, 10); t.i = 0; };
+      const avail = buildQuickQueue(t.asked, 10).length;
       b.appendChild(h('div', { class: 'btns' },
-        h('button', { class: 'btn p', onclick: () => { teach = null; markDirty(); closePanel(); } }, 'Apply to feed'),
-        h('button', { class: 'btn', onclick: () => { teach = null; renderPanel(); } }, 'Back')));
+        avail ? h('button', { class: 'btn p', onclick: () => { more(); renderPanel(); } }, 'Next ' + avail + ' videos') : null,
+        h('button', { class: avail ? 'btn' : 'btn p', onclick: () => { teach = null; markDirty(); closePanel(); } }, 'Apply to feed'),
+        backHome(t)));
+      b.appendChild(loadMoreButton(() => { if (t.i >= t.queue.length) more(); }));
       return;
     }
     const m = t.queue[t.i];
-    const next = () => { t.i++; t.step = 'ask'; t.reasons = new Set(); renderPanel(); };
-    b.appendChild(h('p', { class: 'progress', text: (t.i + 1) + ' / ' + t.queue.length + ' · mode: ' + modeLabel() }));
+    const next = () => { t.asked.add(m.id); t.i++; t.step = 'ask'; t.reasons = new Set(); renderPanel(); };
+    b.appendChild(h('p', { class: 'progress', text: (t.i + 1) + ' / ' + t.queue.length + ' · mood: ' + modeLabel() }));
     b.appendChild(videoCard(m, [m.channel, 'Labels: ' + describe(m), 'Currently ' + currentDecision(m)]));
     if (t.step === 'ask') {
       b.appendChild(h('div', { class: 'btns' },
@@ -2316,6 +2501,131 @@
       b.appendChild(reasonChips(t));
       b.appendChild(h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { submitFeedback(m, false, Array.from(t.reasons), false); t.answered++; next(); } }, 'Next')));
     }
+    b.appendChild(h('div', { class: 'btns' }, backHome(t)));
+  }
+
+  function teachSort(b, t) {
+    const queue = sortQueue(t);
+    const m = queue[0];
+    b.appendChild(h('p', { class: 'progress', text: t.sorted + ' sorted · ' + queue.length + ' left from this feed' }));
+    if (!m) {
+      b.appendChild(h('p', { class: 'big', text: t.sorted ? '✓ You sorted everything YouTube offered so far.' : 'Nothing left to sort on this page.' }));
+      b.appendChild(loadMoreButton());
+      b.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => { teach = null; markDirty(); closePanel(); } }, 'Apply to feed'),
+        backHome(t)));
+      return;
+    }
+    const after = () => { t.selected = new Set(); t.step = 'pick'; t.blockChannel = false; saveLearner(); markDirty(); queueScan(); renderPanel(); };
+    b.appendChild(videoCard(m, [m.channel, 'Labels: ' + describe(m), 'Currently ' + currentDecision(m)]));
+    if (t.step === 'never') {
+      b.appendChild(h('p', { class: 'big', text: 'Are you sure?' }));
+      b.appendChild(h('p', { class: 'note', text: 'This video will never be shown again, in any mood. You can undo it with "Reset what I learned".' }));
+      if (m.channel) {
+        const c = h('input', { type: 'checkbox' }); c.checked = t.blockChannel;
+        c.addEventListener('change', () => { t.blockChannel = c.checked; });
+        b.appendChild(row('Also block the channel ' + m.channel, null, c));
+      }
+      b.appendChild(h('div', { class: 'btns' },
+        h('button', { class: 'btn p', onclick: () => {
+          Lr.markNever(learner, m);
+          if (t.blockChannel && m.channel) { S.channelsBlocked = Array.from(new Set((S.channelsBlocked || []).concat([m.channel]))); saveSettings(); }
+          t.sorted++; after();
+        } }, 'Yes, never show it'),
+        h('button', { class: 'btn', onclick: () => { t.step = 'pick'; renderPanel(); } }, 'Cancel')));
+      return;
+    }
+    b.appendChild(h('h3', { text: 'Which moods does it fit? (pick all that apply)' }));
+    b.appendChild(h('div', { class: 'chips' },
+      moodList().map(x => h('button', { class: 'tchip' + (t.selected.has(x.key) ? ' on' : ''), onclick: () => { t.selected.has(x.key) ? t.selected.delete(x.key) : t.selected.add(x.key); renderPanel(); } }, x.label)),
+      h('button', { class: 'tchip', onclick: () => openEditor(null, 'sort', [m]) }, '＋ New mood')));
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn p', disabled: t.selected.size ? null : true, onclick: () => { Lr.sortVideo(learner, m, Array.from(t.selected), moodList()); t.sorted++; after(); } }, '✓ Save & next'),
+      h('button', { class: 'btn', onclick: () => { Lr.markNoMood(learner, m, moodList()); t.sorted++; after(); } }, 'Fits no mood'),
+      h('button', { class: 'btn', onclick: () => { t.skipped.add(m.id); after(); } }, 'Skip')));
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn', onclick: () => { t.step = 'never'; renderPanel(); } }, '🚫 Never show this'),
+      backHome(t)));
+    b.appendChild(loadMoreButton());
+  }
+
+  // ---- mood editor ----------------------------------------------------------
+  const EMOJIS = ['🎵', '🎮', '🍳', '🌍', '🐾', '🎨', '📖', '🏃', '🧘', '✨', '🌊', '🔧', '🚀', '☕'];
+
+  /** @param mood existing custom mood or null · @param back 'home'|'now'|'sort' · @param preAdd videos to add */
+  function openEditor(mood, back, preAdd) {
+    const base = mood ? JSON.parse(JSON.stringify(mood)) : {
+      id: 'mood_' + Date.now().toString(36), emoji: '✨', label: '', hint: 'Your own mood', custom: true,
+      set: { need: 'custom', loads: [0, 1, 2], tone: 'any', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, includeNoMood: false },
+    };
+    teach = { view: 'editor', draft: base, isNew: !mood, back: back || 'home', add: new Set((preAdd || []).map(x => x.id)), preAdd: preAdd || [], prev: teach };
+    activeTab = 'teach'; panelOpen = true; fb = null;
+    renderPanel();
+  }
+
+  function teachEditor(b, t) {
+    const d = t.draft, st = d.set;
+    const leave = () => {
+      if (t.back === 'now') { teach = null; activeTab = 'now'; }
+      else if (t.back === 'sort' && t.prev && t.prev.view === 'sort') teach = t.prev;
+      else teach = { view: 'home' };
+      renderPanel();
+    };
+    b.appendChild(h('p', { class: 'big', text: t.isNew ? 'Create a mood' : 'Edit ' + d.emoji + ' ' + d.label }));
+    const name = h('input', { type: 'text', placeholder: 'Name, e.g. "Cozy gaming"', style: 'width:100%' });
+    name.value = d.label; name.addEventListener('input', () => { d.label = name.value; });
+    b.appendChild(name);
+    const emoji = h('input', { type: 'text', style: 'width:56px;text-align:center;font-size:20px', 'aria-label': 'Emoji' });
+    emoji.value = d.emoji; emoji.addEventListener('input', () => { d.emoji = emoji.value.trim() || '✨'; });
+    b.appendChild(h('div', { class: 'row' }, h('label', null, 'Emoji'), emoji));
+    b.appendChild(h('div', { class: 'chips' }, EMOJIS.map(e => h('button', { class: 'tchip' + (d.emoji === e ? ' on' : ''), onclick: () => { d.emoji = e; renderPanel(); } }, e))));
+    const baseSel = h('select', { onchange: e => { st.need = e.target.value; } },
+      Object.keys(P.NEED_LABELS).map(k => { const o = h('option', { value: k }, P.NEED_LABELS[k]); if (st.need === k) o.selected = true; return o; }));
+    b.appendChild(row('Start from', '"Only what I teach it" shows just the videos you add or sort into this mood', baseSel));
+    const loads = P.loadsOf(st);
+    b.appendChild(row('Videos that are', null, h('div', { class: 'seg' }, [[0, 'Easy'], [1, 'Medium'], [2, 'Demanding']].map(([v, l]) => h('button', { class: loads.includes(v) ? 'on' : '', onclick: () => {
+      const set = new Set(loads); set.has(v) ? set.delete(v) : set.add(v); if (set.size) { st.loads = Array.from(set).sort(); renderPanel(); }
+    } }, l)))));
+    const segSet = (key, opts) => seg(opts, st[key], v => { st[key] = v; renderPanel(); });
+    b.appendChild(row('Tone', null, segSet('tone', [['light', 'Light'], ['balanced', 'Balanced'], ['any', 'Any']])));
+    b.appendChild(row('Politics', null, segSet('politics', [['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']])));
+    b.appendChild(row('News', null, segSet('news', [['hide', 'No'], ['show', 'Yes']])));
+    b.appendChild(row('Distressing topics', null, segSet('distressing', [['hide', 'Hide'], ['show', 'Allow']])));
+    const inc = h('input', { type: 'checkbox' }); inc.checked = !!st.includeNoMood;
+    inc.addEventListener('change', () => { st.includeNoMood = inc.checked; });
+    b.appendChild(row('Also show the whole "fits no mood" pile', null, inc));
+
+    const pile = t.preAdd.concat(Lr.noMoodVideos(learner).filter(x => !t.preAdd.some(p => p.id === x.id)));
+    b.appendChild(h('h3', { text: 'Add videos' + (pile.length ? '' : ' – your "fits no mood" pile is empty') }));
+    if (pile.length) b.appendChild(h('p', { class: 'note', text: 'From your "fits no mood" pile. Similar videos will join this mood automatically.' }));
+    for (const x of pile.slice(0, 60)) {
+      const c = h('input', { type: 'checkbox' }); c.checked = t.add.has(x.id);
+      c.addEventListener('change', () => { c.checked ? t.add.add(x.id) : t.add.delete(x.id); });
+      b.appendChild(h('label', { class: 'card', style: 'align-items:center;cursor:pointer' }, c,
+        h('img', { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(x.id) + '/mqdefault.jpg', alt: '', loading: 'lazy', style: 'width:96px', onerror: e => { e.target.style.visibility = 'hidden'; } }),
+        h('div', null, h('div', { class: 't', text: x.title || x.id }), h('div', { class: 'm', text: x.channel || '' }))));
+    }
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn p', onclick: () => {
+        d.label = (d.label || '').trim();
+        if (!d.label) { name.focus(); name.placeholder = 'Please give your mood a name'; return; }
+        d.hint = (P.NEED_LABELS[st.need] || 'Your own mood') + (t.add.size ? ' · ' + t.add.size + ' videos' : '');
+        const i = customMoods.findIndex(m => m.id === d.id);
+        if (i >= 0) customMoods[i] = d; else customMoods.push(d);
+        saveMoods();
+        const byId = new Map(pile.map(x => [x.id, x]));
+        for (const id of t.add) { const x = byId.get(id); if (x) Lr.feedback(learner, x, d.id, true, [], d.emoji + ' ' + d.label, 1); }
+        saveLearner();
+        if (t.back === 'sort' && t.prev && t.prev.view === 'sort') { t.prev.selected.add(d.id); leave(); return; }
+        applyPreset(d.id); markDirty(); teach = null; activeTab = 'now'; renderPanel();
+      } }, t.isNew ? 'Create & use this mood' : 'Save'),
+      h('button', { class: 'btn', onclick: leave }, 'Cancel'),
+      !t.isNew ? h('button', { class: 'btn', onclick: () => {
+        if (!confirm('Delete the mood "' + d.label + '"?')) return;
+        customMoods = customMoods.filter(m => m.id !== d.id); saveMoods();
+        if (currentPreset === d.id) { currentPreset = null; store.set('preset', null); }
+        leave();
+      } }, 'Delete') : null));
   }
 
   function renderAi(b) {

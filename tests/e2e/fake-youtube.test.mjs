@@ -46,6 +46,11 @@ function homeHtml() {
     });
     const d = window.ytInitialData;
     renderItems(d.contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.richGridRenderer.contents, document.getElementById('feed'));
+    let busy = false;
+    window.addEventListener('scroll', async () => {
+      if (busy || window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 50) return;
+      busy = true; try { await window.loadMore(); } finally { busy = false; }
+    });
     window.loadMore = async () => {
       const r = await fetch('/youtubei/v1/browse?prettyPrint=false', { method: 'POST', body: JSON.stringify({ continuation: 'NEXT' }) });
       const j = await r.json();
@@ -80,6 +85,13 @@ const continuation = {
     { continuationItemRenderer: {} },
   ] } }],
 };
+const generatedBatch = n => ({
+  onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+    { richItemRenderer: { content: vwc('gen' + n + 'a_____', 'Relaxing piano for a calm evening ' + n, 'Calm Place', '30:00') } },
+    { richItemRenderer: { content: vwc('gen' + n + 'b_____', 'Minecraft castle build ' + n, 'Blocky', '12:00') } },
+    { continuationItemRenderer: {} },
+  ] } }],
+});
 const postsChipResponse = {
   onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
     { richItemRenderer: { content: post('chip_post1', 'A post you asked for') } },
@@ -96,15 +108,19 @@ let browser;
 before(async () => { if (chromium) browser = await chromium.launch(); });
 after(async () => { if (browser) await browser.close(); });
 
-async function newPage() {
+async function newPage(pre) {
   const ctx = await browser.newContext({ viewport: { width: 400, height: 800 } });
+  if (pre) await ctx.addInitScript(pre); // runs before the app reads its storage
   await ctx.addInitScript({ content: bundle() });
+  let batch = 0;
   await ctx.route('**/*', async route => {
     const url = new URL(route.request().url());
     if (url.hostname !== 'm.youtube.com') return route.abort();
     if (url.pathname === '/youtubei/v1/browse') {
       const body = route.request().postData() || '';
-      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body.includes('CHIP_POSTS') ? postsChipResponse : continuation) });
+      if (body.includes('CHIP_POSTS')) return route.fulfill({ contentType: 'application/json', body: JSON.stringify(postsChipResponse) });
+      batch++;
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(batch === 1 ? continuation : generatedBatch(batch)) });
     }
     if (url.pathname === '/youtubei/v1/next') return route.fulfill({ contentType: 'application/json', body: JSON.stringify(nextContinuation) });
     if (url.pathname === '/watch') return route.fulfill({ contentType: 'text/html', body: watchHtml(url.searchParams.get('v')) });
@@ -271,14 +287,20 @@ test('feedback sheet: "doesn\'t fit" hides the card at once and is remembered af
   await ctx.close();
 });
 
-test('Teach wizard walks through feed videos and records answers', { skip: !chromium && 'playwright not installed' }, async () => {
-  const { page, ctx, errors } = await newPage();
+async function openTeach(page) {
   await page.addInitScript(() => localStorage.setItem('mindful:lastCheckIn', String(Date.now())));
   await page.goto('https://m.youtube.com/');
   const ui = page.locator('#mindful-feed-ui');
   await ui.locator('.fab').click();
   await ui.getByRole('button', { name: /Teach/ }).click();
-  await ui.getByRole('button', { name: /^Start$/ }).click();
+  return ui;
+}
+const learnerState = page => page.evaluate(() => JSON.parse(localStorage.getItem('mindful:learner') || '{}'));
+
+test('Teach › quick check: yes/no for the current mood', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  const ui = await openTeach(page);
+  await ui.getByRole('button', { name: /Quick check/ }).click();
   assert.match(await ui.locator('.progress').innerText(), /^1 \/ \d+/);
   await ui.getByRole('button', { name: /^✅ Fits$/ }).click();
   assert.match(await ui.locator('.progress').innerText(), /^2 \//);
@@ -286,8 +308,87 @@ test('Teach wizard walks through feed videos and records answers', { skip: !chro
   await ui.getByRole('button', { name: /Political/ }).click();
   await ui.getByRole('button', { name: /^Next$/ }).click();
   assert.match(await ui.locator('.progress').innerText(), /^3 \//);
-  const count = await page.evaluate(() => JSON.parse(localStorage.getItem('mindful:learner')).count);
-  assert.equal(count, 2);
+  assert.equal((await learnerState(page)).count, 2);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('Teach › sort my feed: several moods, "fits no mood", "never show" with confirmation', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  const ui = await openTeach(page);
+  await ui.getByRole('button', { name: /Sort my feed/ }).click();
+  const title = async () => (await ui.locator('.card .t').first().innerText()).trim();
+  const idOf = t => page.evaluate(t => [...window.MindfulFeed.verdicts.values()].find(v => v.meta.title === t).meta.id, t);
+
+  assert.equal(await ui.getByRole('button', { name: /Save & next/ }).isDisabled(), true, 'needs at least one mood');
+  const first = await idOf(await title());
+  await ui.getByRole('button', { name: /Drained/ }).click();
+  await ui.getByRole('button', { name: /Need a laugh/ }).click();
+  await ui.getByRole('button', { name: /Save & next/ }).click();
+  let L = await learnerState(page);
+  assert.equal(L.videos[first].drained, 1);
+  assert.equal(L.videos[first].laugh, 1);
+  assert.equal(L.videos[first].sleep, -1, 'unselected moods: does not fit');
+
+  const second = await idOf(await title());
+  await ui.getByRole('button', { name: /^Fits no mood$/ }).click();
+  L = await learnerState(page);
+  assert.ok(L.videos[second].nomood, 'in the "fits no mood" pile');
+
+  const third = await idOf(await title());
+  await ui.getByRole('button', { name: /Never show this/ }).click();
+  assert.match(await ui.locator('.sheet').innerText(), /Are you sure/);
+  await ui.getByRole('button', { name: /Yes, never show it/ }).click();
+  L = await learnerState(page);
+  assert.equal(L.videos[third].never, true);
+  assert.match(await ui.locator('.progress').innerText(), /^3 sorted/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('Create a mood from the "fits no mood" pile and use it', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  const ui = await openTeach(page);
+  await ui.getByRole('button', { name: /Sort my feed/ }).click();
+  const t = (await ui.locator('.card .t').first().innerText()).trim();
+  const vid = await page.evaluate(t => [...window.MindfulFeed.verdicts.values()].find(v => v.meta.title === t).meta.id, t);
+  await ui.getByRole('button', { name: /^Fits no mood$/ }).click();
+  await ui.getByRole('button', { name: /Back/ }).click();
+  await ui.getByRole('button', { name: /Create a mood/ }).click();
+  await ui.locator('input[placeholder^="Name"]').fill('Cozy corner');
+  await ui.locator('label.card', { hasText: t }).locator('input[type=checkbox]').check();
+  await ui.getByRole('button', { name: /Create & use this mood/ }).click();
+  const s = await page.evaluate(() => window.MindfulFeed.settings());
+  assert.equal(s.need, 'custom');
+  assert.match(await ui.locator('.sheet').innerText(), /✨ Cozy corner/);
+  await Promise.all([page.waitForNavigation(), ui.locator('.x').first().click()]);
+  const ids = await renderedIds(page);
+  assert.ok(ids.includes(vid), 'the added video is in the new mood: ' + ids.join());
+  assert.ok(!ids.includes('vid_lect001'));
+  // the new mood is offered in the check-in grid as well
+  assert.ok((await page.evaluate(() => JSON.parse(localStorage.getItem('mindful:moods')).map(m => m.label))).includes('Cozy corner'));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('Load more fetches further recommendations from YouTube; a near-empty feed fills itself', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage(() => {
+    localStorage.setItem('mindful:lastCheckIn', String(Date.now()));
+    localStorage.setItem('mindful:settings', JSON.stringify({ need: 'inspire', loads: [0, 1], tone: 'light', strictNeed: true }));
+  });
+  await page.goto('https://m.youtube.com/');
+  const start = await page.evaluate(() => window.MindfulFeed.verdicts.size);
+  // auto-fill: nothing fits "need a lift" here, so it keeps asking YouTube for more
+  await page.waitForFunction(n => window.MindfulFeed.verdicts.size > n + 2, start, { timeout: 15000 });
+  const ui = page.locator('#mindful-feed-ui');
+  await ui.locator('.fab').click();
+  await ui.getByRole('button', { name: /Teach/ }).click();
+  await ui.getByRole('button', { name: /Sort my feed/ }).click();
+  const before = await page.evaluate(() => window.MindfulFeed.verdicts.size);
+  await ui.getByRole('button', { name: /Load more videos/ }).click();
+  await ui.getByText(/new videos from YouTube/).waitFor({ timeout: 15000 });
+  const after = await page.evaluate(() => window.MindfulFeed.verdicts.size);
+  assert.ok(after > before, before + ' → ' + after);
   assert.deepEqual(errors, []);
   await ctx.close();
 });

@@ -25,6 +25,7 @@
   'use strict';
 
   const THRESHOLD = 2;
+  const NONE = '__none';   // learner key for the "fits no mood" pile
   const MAX_W = 6;
 
   const STOP = new Set((
@@ -59,7 +60,7 @@
   }
 
   function empty() {
-    return { v: 1, modes: {}, dims: {}, videos: {}, examples: [], count: 0 };
+    return { v: 2, modes: {}, dims: {}, videos: {}, examples: [], count: 0 };
   }
 
   function load(stored) {
@@ -68,6 +69,7 @@
       for (const k of ['modes', 'dims', 'videos']) if (stored[k] && typeof stored[k] === 'object') m[k] = stored[k];
       if (Array.isArray(stored.examples)) m.examples = stored.examples;
       m.count = stored.count || 0;
+      m.v = stored.v || 1;
     }
     return m;
   }
@@ -108,18 +110,23 @@
    * @param reasons array of REASONS keys (only meaningful when !fits)
    * @param modeLabel human label, stored with the example for the AI prompt
    */
-  function feedback(model, meta, mode, fits, reasons, modeLabel) {
+  function feedback(model, meta, mode, fits, reasons, modeLabel, weight) {
     reasons = (reasons || []).filter(r => REASONS[r]);
+    weight = weight == null ? 1 : weight;
     const feats = features(meta);
-    const prev = model.videos[meta.id] && model.videos[meta.id][mode];
-    const delta = fits ? 1 : -1;
-    // Undo a previous opposite verdict on the same video before applying.
-    if (prev !== undefined && prev !== delta) bump(model.modes[mode] = model.modes[mode] || {}, feats, -prev);
-    if (prev !== delta) bump(model.modes[mode] = model.modes[mode] || {}, feats, delta);
-
     const v = model.videos[meta.id] = model.videos[meta.id] || {};
+    v.w = v.w || {};
+    const prev = v[mode];
+    const prevW = v.w[mode] == null ? 1 : v.w[mode];
+    const delta = fits ? 1 : -1;
+    const map = model.modes[mode] = model.modes[mode] || {};
+    // Replace a previous answer on the same video instead of stacking it.
+    if (prev !== undefined) bump(map, feats, -prev * prevW);
+    bump(map, feats, delta * weight);
     v[mode] = delta;
+    v.w[mode] = weight;
     v.at = Date.now();
+    if (fits) delete v.nomood;
     if (!fits && reasons.length) {
       v.reasons = Array.from(new Set((v.reasons || []).concat(reasons)));
       for (const r of reasons) {
@@ -127,15 +134,79 @@
         if (dim) bump(model.dims[dim] = model.dims[dim] || {}, feats, 1);
       }
     }
-    if (fits) {
-      // A video that fits a calm/light mode was evidently not "heavy"/"clickbait" for this user.
-      if (['relax', 'comfort', 'laugh', 'inspire'].includes(mode)) bump(model.dims.heavy = model.dims.heavy || {}, feats, -0.5);
+    if (fits && weight >= 1) {
+      // A video that fits a calm/light mood was evidently not "heavy" for this user.
+      if (CALM.test(mode)) bump(model.dims.heavy = model.dims.heavy || {}, feats, -0.5);
     }
-    model.examples = model.examples.filter(e => !(e.id === meta.id && e.mode === mode));
-    model.examples.push({ id: meta.id, title: meta.title || '', channel: meta.channel || '', mode, modeLabel: modeLabel || mode, fits: !!fits, reasons, at: Date.now() });
-    if (model.examples.length > 200) model.examples = model.examples.slice(-200);
-    model.count++;
+    if (weight >= 1) {
+      model.examples = model.examples.filter(e => !(e.id === meta.id && e.mode === mode));
+      model.examples.push({ id: meta.id, title: meta.title || '', channel: meta.channel || '', mode, modeLabel: modeLabel || mode, fits: !!fits, reasons, at: Date.now() });
+      if (model.examples.length > 200) model.examples = model.examples.slice(-200);
+      model.count++;
+    }
     prune(model);
+    return model;
+  }
+  const CALM = /^(relax|comfort|laugh|inspire|drained|anxious|sleep|laugh|lowMotivation|unwind)$/;
+
+  /**
+   * "Sort my feed": the video fits exactly the selected moods. Unselected moods
+   * get a weaker "doesn't fit" (they weren't actively rejected).
+   * @param moods  [{key,label}] all moods the user can pick from
+   */
+  function sortVideo(model, meta, selectedKeys, moods) {
+    const sel = new Set(selectedKeys || []);
+    for (const m of moods) feedback(model, meta, m.key, sel.has(m.key), [], m.label, sel.has(m.key) ? 1 : 0.5);
+    const v = model.videos[meta.id];
+    delete v.nomood; delete v.never;
+    if (v[NONE] !== undefined) feedback(model, meta, NONE, false, [], 'fits no mood', 1);
+    v.sorted = Date.now();
+    model.count++;
+    return model;
+  }
+
+  /** "Fits no mood": out of every mood, collected in a pile you can build a new mood from. */
+  function markNoMood(model, meta, moods) {
+    for (const m of moods) feedback(model, meta, m.key, false, [], m.label, 0.5);
+    feedback(model, meta, NONE, true, [], 'fits no mood', 1);
+    const v = model.videos[meta.id];
+    v.nomood = { title: meta.title || '', channel: meta.channel || '', durationText: meta.durationText || null };
+    v.sorted = Date.now();
+    return model;
+  }
+
+  /** "Never show": this video never appears, in any mood. */
+  function markNever(model, meta) {
+    const v = model.videos[meta.id] = model.videos[meta.id] || {};
+    v.never = true; v.at = v.sorted = Date.now();
+    delete v.nomood;
+    model.count++;
+    return model;
+  }
+
+  /** Videos in the "fits no mood" pile (newest first). */
+  function noMoodVideos(model) {
+    return Object.keys(model.videos)
+      .filter(id => model.videos[id].nomood)
+      .map(id => Object.assign({ id }, model.videos[id].nomood, { at: model.videos[id].sorted || model.videos[id].at }))
+      .sort((a, b) => b.at - a.at);
+  }
+
+  function isSorted(model, id) { const v = model.videos[id]; return !!(v && (v.sorted || v.never)); }
+
+  /** v1 learned per need ("relax"); v2 learns per mood ("drained", "sleep", custom moods). */
+  function migrateToMoods(model, presets) {
+    if (model.v >= 2) return model;
+    for (const key of Object.keys(presets)) {
+      const need = presets[key].set && presets[key].set.need;
+      if (!need || !model.modes[need] || model.modes[key]) continue;
+      model.modes[key] = Object.assign({}, model.modes[need]);
+      for (const id of Object.keys(model.videos)) {
+        const v = model.videos[id];
+        if (v[need] !== undefined && v[key] === undefined) v[key] = v[need];
+      }
+    }
+    model.v = 2;
     return model;
   }
 
@@ -163,10 +234,11 @@
     else if (s <= -THRESHOLD) verdict = 'no';
     const dims = {};
     for (const name of Object.keys(model.dims)) {
-      dims[name] = score(model.dims[name], feats) >= THRESHOLD || (v.reasons || []).some(r => REASONS[r] && REASONS[r].dim === name);
+      dims[name] = score(model.dims[name], feats) >= THRESHOLD;
     }
     for (const r of v.reasons || []) if (REASONS[r] && REASONS[r].dim) dims[REASONS[r].dim] = true;
-    return { explicit, score: s, verdict, dims, reasons: v.reasons || [] };
+    const nomood = !!v.nomood || (v[NONE] === undefined && !v.sorted && score(model.modes[NONE], feats) >= THRESHOLD);
+    return { explicit, score: s, verdict, dims, reasons: v.reasons || [], never: !!v.never, nomood };
   }
 
   /** Apply learned dimensions to a classifier profile (returns a new profile). */
@@ -197,6 +269,9 @@
     return model.examples.slice(-(n || 40)).map(e => ({ title: e.title, channel: e.channel, mode: e.modeLabel, fits: e.fits, reasons: e.reasons.map(r => REASONS[r] ? REASONS[r].label.replace(/^\S+\s/, '') : r) }));
   }
 
-  root.MindfulLearner = { features, empty, load, feedback, judge, adjustProfile, top, examplesForAi, REASONS, THRESHOLD };
+  root.MindfulLearner = {
+    features, empty, load, feedback, judge, adjustProfile, top, examplesForAi, sortVideo, markNoMood, markNever,
+    noMoodVideos, isSorted, migrateToMoods, REASONS, THRESHOLD, NONE,
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulLearner;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

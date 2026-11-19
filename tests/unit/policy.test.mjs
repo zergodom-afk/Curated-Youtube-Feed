@@ -135,3 +135,17 @@ test('shelf: caps, prefers keeping saved items, expires', () => {
   assert.ok(e.shelf.every(x => x.source === 'saved'));
   assert.ok(e.letGo.length >= 1);
 });
+
+test('never-show beats everything; the "fits no mood" pile shows only where included', () => {
+  const s = settings('unwind');
+  assert.equal(run('Relaxing piano music for a calm evening', s, { learned: { never: true } }).action, 'hide');
+  const pile = { nomood: true, explicit: -1, verdict: 'no' };
+  assert.equal(run('Train cab ride', s, { learned: pile }).action, 'hide');
+  assert.equal(run('Train cab ride', Object.assign({}, s, { includeNoMood: true }), { learned: pile }).action, 'show');
+});
+
+test('custom mood without a base need only shows what you taught it', () => {
+  const s = settings(null, { need: 'custom', loads: [0, 1, 2], tone: 'any', strictNeed: true });
+  assert.equal(run('Relaxing piano music for a calm evening', s).action, 'hide');
+  assert.equal(run('Relaxing piano music for a calm evening', s, { learned: { verdict: 'yes', score: 3 } }).action, 'show');
+});

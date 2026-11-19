@@ -33,6 +33,8 @@
     hidePosts: true,      // community posts – only shown when the "Posts" chip is selected or on a channel's posts tab
     hideAds: false,       // in-feed ad cards only; player ads are never touched
     strictNeed: true,     // only videos that clearly match the chosen need (unclassified ones are hidden)
+    includeNoMood: false, // also show videos you sorted into "fits no mood"
+    autoFill: true,       // keep fetching more from YouTube while the feed is nearly empty
     // ---- watch page ----
     hideRelated: true,
     hideEndscreens: true,
@@ -121,7 +123,7 @@
   function maxLoadOf(s) { return Math.max.apply(null, loadsOf(s)); }
 
   const NEED_LABELS = {
-    any: 'Anything that fits', relax: 'Relaxation', laugh: 'Laughter / fun', curious: 'Light curiosity',
+    any: 'Anything that fits', custom: 'Only what I teach it', relax: 'Relaxation', laugh: 'Laughter / fun', curious: 'Light curiosity',
     learn: 'Learning', create: 'Doing / making', inspire: 'Inspiration', comfort: 'Comfort / safety',
   };
 
@@ -175,6 +177,8 @@
 
     // Your own feedback on this exact video (for this mode) beats every rule below.
     const L = ctx.learned || null;
+    if (L && L.never) return { action: 'hide', reason: 'you chose never to show this' };
+    if (L && L.nomood && s.includeNoMood) return { action: 'show', reason: 'from your "fits no mood" pile' };
     if (L && L.explicit === 1) return { action: 'show', reason: 'you said this fits' };
     if (L && L.explicit === -1) return { action: 'hide', reason: "you said this doesn't fit this mode" };
 

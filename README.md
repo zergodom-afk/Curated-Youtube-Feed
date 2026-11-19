@@ -8,7 +8,8 @@ your account and history, and only lets through what fits **how you feel right n
 <img src="docs/screenshots/1-checkin.png" width="190" alt="Mood check-in">
 <img src="docs/screenshots/6-focused-ask.png" width="190" alt="Focused: political or not">
 <img src="docs/screenshots/7-feedback.png" width="190" alt="Does this fit? feedback">
-<img src="docs/screenshots/8-teach.png" width="190" alt="Teach wizard">
+<img src="docs/screenshots/10-sort.png" width="190" alt="Sort my feed">
+<img src="docs/screenshots/11-new-mood.png" width="190" alt="Create a mood">
 <img src="docs/screenshots/4-shelf.png" width="190" alt="Later shelf">
 </p>
 
@@ -101,9 +102,21 @@ demanding, too shallow, political, parasocial, clickbait, or wrong vibe.
   and the channel) with videos you rated, it is treated the same way.
 - The reasons are learned across modes. "Too heavy" teaches what feels heavy
   *to you*, and that then applies in every calm mode.
-- **🎓 Teach** is a short wizard. It shows up to 10 videos from your feed,
-  some shown and some held back, and you answer *fits / doesn't fit / skip*.
-  It also shows what it has learned, and you can reset that.
+- **🎓 Teach** has two ways to train it:
+  - **Quick check**: yes/no for your current mood, 10 videos at a time.
+    "Next 10" continues.
+  - **Sort my feed**: goes through every video YouTube offered, shown or held
+    back. Pick *all* moods a video fits, *Fits no mood*, or *Never show*
+    (after an "Are you sure?").
+- **Your own moods.** *Create a mood*: give it a name and emoji, choose what
+  it starts from (an existing need, or *only what I teach it*), set
+  difficulty, tone and politics, and fill it with videos from your "fits no
+  mood" pile. Any mood can also show that whole pile with *Also show "fits no
+  mood" videos*.
+- **⤓ Load more videos** scrolls YouTube's own feed so it sends more
+  recommendations to sort. When the feed is nearly empty, the app does this on
+  its own for a few rounds, and pauses while you are touching the screen.
+- *What I've learned* shows the words and channels it picked up, with a reset.
 - In the *Filtered* tab, "👍 Should be shown" corrects a wrong hide.
 - **With an API key**, your recent answers are also sent to Claude with each
   classification request, so its labels match your sense of "heavy" or
