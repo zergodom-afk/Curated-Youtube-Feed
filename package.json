@@ -1,0 +1,12 @@
+{
+  "name": "mindful-feed",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A calmer YouTube feed that respects your current mental state.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/unit/*.test.mjs",
+    "test:e2e": "node --test tests/e2e/*.test.mjs"
+  }
+}
