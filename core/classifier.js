@@ -100,6 +100,22 @@
       'quarter life crisis', 'void', 'death of', 'dying', 'nobody cares', 'traurig', 'einsam*', 'angst',
       'gefahr*', 'sinnlos*',
     ],
+    music: [
+      'music', 'song', 'songs', 'official video', 'official music video', 'official audio', 'lyric*',
+      'audio', 'album', 'live session', 'acoustic', 'remix', 'lofi', 'lo-fi', 'beats', 'soundtrack',
+      'ost', 'playlist', 'concert', 'live at', 'unplugged', 'cover', 'feat', 'ft', 'piano', 'guitar',
+      'symphony', 'orchestra', 'jazz', 'classical music', 'hip hop', 'rap', 'techno', 'house mix', 'dj set',
+      'musik', 'lied', 'single',
+    ],
+    // Emotionally taxing, or content that keeps you dwelling in a feeling.
+    emotional: [
+      'emotional', 'heartbreak*', 'heartbroken', 'tearjerker', 'tear jerker', 'will make you cry', 'cry', 'crying',
+      'cried', 'tears', 'sad', 'sad songs', 'saddest', 'melanchol*', 'nostalgi*', 'grief', 'griev*', 'loss of',
+      'goodbye', 'farewell', 'miss you', 'missing you', 'lonely', 'loneliness', 'breakup', 'broke up',
+      'broken heart', 'trauma*', 'my story', 'struggl*', 'depress*', 'anxiety', 'panic attack', 'healing',
+      'therapy', 'vent', 'venting', 'vulnerable', 'final days', 'last words', 'touching', 'heartwarming',
+      'moving story', 'traurig', 'weinen', 'abschied', 'herzschmerz', 'einsam*',
+    ],
     relax: [
       'relax*', 'calm*', 'ambient', 'ambience', 'asmr', 'lofi', 'lo-fi', 'chill*', 'sleep*',
       'meditat*', 'breathing', 'yoga', 'nature sounds', 'rain sounds', 'rain', 'ocean waves',
@@ -192,6 +208,30 @@
 
   const NEEDS = ['relax', 'laugh', 'curious', 'learn', 'create', 'inspire', 'comfort'];
 
+  // Content types – what a video *is*. Used for difficulty, for the setup
+  // questionnaire ("what helps when you're drained?") and for your moods.
+  // load: typical difficulty (0 easy, 1 medium, 2 demanding) before personal calibration.
+  const TYPE_DEFS = {
+    ambient: { emoji: '🌧️', label: 'Ambient & nature sounds', load: 0, words: ['ambient', 'ambience', 'rain sounds', 'nature sounds', 'white noise', 'brown noise', 'slow tv', 'fireplace', 'ocean waves', 'birdsong', 'forest sounds', '4k walk', 'walking tour', 'train ride', 'aquarium', 'asmr', 'sleep sounds', 'study with me', 'lofi', 'lo-fi'] },
+    music: { emoji: '🎵', label: 'Music', load: 0, words: [] },
+    comedy: { emoji: '😂', label: 'Comedy & sketches', load: 0, words: ['funny', 'comedy', 'comedian', 'sketch', 'stand-up', 'standup', 'parody', 'satire', 'bloopers', 'outtakes', 'improv', 'hilarious', 'memes', 'sitcom', 'lustig'] },
+    animals: { emoji: '🐾', label: 'Animals', load: 0, words: ['cat', 'cats', 'kitten*', 'dog', 'dogs', 'puppy', 'puppies', 'animal*', 'wildlife', 'bird*', 'otter*', 'pet', 'pets', 'rescue', 'zoo', 'tiere'] },
+    gaming: { emoji: '🎮', label: 'Gaming & let\'s plays', load: 0, words: ["let's play", 'lets play', 'gameplay', 'playthrough', 'walkthrough', 'speedrun', 'minecraft', 'stardew', 'zelda', 'pokemon', 'nintendo', 'gaming', 'stream highlights', 'no commentary'] },
+    cozy: { emoji: '🫖', label: 'Cozy & slow living', load: 0, words: ['cozy', 'cosy', 'slow living', 'cottage*', 'cottagecore', 'hygge', 'gardening', 'garden tour', 'cleaning', 'organizing', 'organising', 'morning routine', 'quiet day', 'peaceful day', 'gemütlich'] },
+    making: { emoji: '🍳', label: 'Cooking, crafts & DIY', load: 1, words: ['recipe*', 'cooking', 'baking', 'bake', 'diy', 'how to make', 'woodworking', 'craft*', 'knitting', 'crochet', 'sewing', 'pottery', 'restoration', 'restoring', 'repair*', 'build*', 'rezept*', 'kochen', 'backen'] },
+    sports: { emoji: '⚽', label: 'Sports', load: 1, words: ['football', 'soccer', 'basketball', 'nba', 'nfl', 'tennis', 'f1', 'formula 1', 'highlights', 'match', 'goals', 'bundesliga', 'champions league', 'ufc', 'boxing', 'cycling', 'climbing', 'workout', 'fitness'] },
+    travel: { emoji: '✈️', label: 'Travel & places', load: 0, words: ['travel*', 'trip', 'road trip', 'backpacking', 'exploring', 'visit*', 'tour of', 'city walk', 'island', 'van life', 'reise*'] },
+    curiosity: { emoji: '🤔', label: 'Light explainers & fun facts', load: 1, words: ['explained', 'how does', 'why do', 'why does', 'why is', 'what if', 'what happens', 'fun facts', 'facts', 'did you know', 'how it works', 'in 5 minutes', 'in 10 minutes', 'erklärt'] },
+    essays: { emoji: '🎬', label: 'Video essays & documentaries', load: 2, words: ['video essay', 'essay', 'documentary', 'doku*', 'dokumentation', 'the story of', 'rise and fall', 'deep dive', 'analysis', 'retrospective', 'history of', 'the truth about', 'investigat*', 'breakdown'] },
+    lectures: { emoji: '🎓', label: 'Lectures, courses & tutorials', load: 2, words: ['lecture', 'full course', 'course', 'lesson*', 'masterclass', 'seminar', 'university', 'tutorial', 'crash course', 'online class', 'introduction to', 'intro to', 'vorlesung', 'webinar', 'conference talk'] },
+    podcasts: { emoji: '🎙️', label: 'Podcasts & interviews', load: 1, words: ['podcast', 'interview', 'in conversation', 'conversation with', 'episode', 'ep.', 'q&a with', 'panel', 'talk show', 'roundtable'] },
+    news: { emoji: '📰', label: 'News & politics', load: 1, words: [] },
+    vlogs: { emoji: '📹', label: 'Vlogs & creator life', load: 0, words: [] },
+    motivation: { emoji: '🌱', label: 'Motivation & self-improvement', load: 1, words: ['motivation*', 'self improvement', 'self-improvement', 'productivity', 'habits', 'discipline', 'mindset', 'success', 'inspir*', 'how i changed', 'glow up'] },
+    emotional: { emoji: '💧', label: 'Emotional stories', load: 1, words: [] },
+    reviews: { emoji: '🛍️', label: 'Reviews & tech', load: 1, words: ['review', 'unboxing', 'tested', 'worth it', 'comparison', 'buying guide', 'vs', 'hands-on', 'first look', 'iphone', 'android', 'laptop', 'camera'] },
+  };
+
   // ---------------------------------------------------------------------------
   // Matching helpers
   // ---------------------------------------------------------------------------
@@ -218,6 +258,35 @@
   for (const k of Object.keys(LEX)) COMPILED[k] = LEX[k].filter(e => (Array.isArray(e) ? e[1] : 1) > 0).map(compile);
   const COMPILED_TOPICS = {};
   for (const k of Object.keys(TOPICS)) COMPILED_TOPICS[k] = TOPICS[k].map(compile);
+  const COMPILED_TYPES = {};
+  for (const k of Object.keys(TYPE_DEFS)) COMPILED_TYPES[k] = TYPE_DEFS[k].words.map(compile);
+
+  // YouTube's own category (fetched for unclear videos) → strong hints.
+  const CATEGORY_HINTS = {
+    'Music': { types: ['music'], music: true },
+    'Comedy': { types: ['comedy'] },
+    'Gaming': { types: ['gaming'] },
+    'Education': { info: true },
+    'Science & Technology': { info: true },
+    'News & Politics': { news: true },
+    'Howto & Style': { types: ['making'] },
+    'Pets & Animals': { types: ['animals'] },
+    'Sports': { types: ['sports'] },
+    'Travel & Events': { types: ['travel'] },
+    'People & Blogs': { parasocial: 1 },
+    'Nonprofits & Activism': { info: true },
+  };
+
+  /** How "academic" a title reads: long words, jargon, many words. */
+  function titleComplexity(title) {
+    const words = String(title || '').match(/[A-Za-z\u00C0-\u024F]+/g) || [];
+    let c = 0;
+    if (words.filter(w => w.length >= 11).length >= 2) c++;
+    if (/\b[a-z]+(ology|ologies|ism|isms|ization|isation|ometry|ological|istic|ivity)\b/i.test(title)) c++;
+    if (/\b(theor(y|em|ies)|paradox|hypothes[ie]s|equation|proof|framework|mechanism|epistemolog|ontolog|thermodynamic|quantum|algorithm|neural|macroeconom|geopolitic|dialectic|phenomenolog|semiotic|calculus|topolog|cognitive)/i.test(title)) c++;
+    if (words.length >= 13) c++;
+    return c;
+  }
 
   function hits(list, text) {
     const out = [];
@@ -260,13 +329,17 @@
    */
   function classify(meta) {
     meta = meta || {};
+    const reasons_pre = [];
     const title = String(meta.title || '');
     const channel = String(meta.channel || '');
     const desc = String(meta.description || '');
-    const text = (title + ' \n ' + channel + ' \n ' + desc).toLowerCase();
+    const tags = Array.isArray(meta.tags) ? meta.tags.join(' · ') : '';
+    const text = (title + ' \n ' + channel + ' \n ' + desc + ' \n ' + tags).toLowerCase();
+    const hint = CATEGORY_HINTS[meta.category] || {};
+    if (meta.category) reasons_pre.push('YouTube category: ' + meta.category);
     const titleLc = (title + ' \n ' + channel).toLowerCase();
     const dur = meta.durationSec != null ? meta.durationSec : parseDuration(meta.durationText);
-    const reasons = [];
+    const reasons = reasons_pre;
 
     const pol = score(COMPILED.political, titleLc);
     const news = score(COMPILED.news, titleLc);
@@ -289,19 +362,19 @@
     if (typo.labels.length) reasons.push('typography: ' + typo.labels.join(', '));
     if (meta.isShort) { addictive += 5; reasons.push('Short'); }
 
-    let parasocial = para.score;
+    let parasocial = para.score + (hint.parasocial || 0);
     if (para.labels.length) reasons.push('parasocial: ' + para.labels.join(', '));
     // Very long streams/VODs are typically companionship content.
     if (dur != null && dur > 3 * 3600 && !relax.score) { parasocial += 1; reasons.push('very long stream'); }
 
     const political = pol.score >= 1;
     if (political) reasons.push('political: ' + pol.labels.slice(0, 4).join(', '));
-    const isNews = news.score >= 1;
+    const isNews = news.score >= 1 || !!hint.news;
     if (isNews) reasons.push('news');
     const distressing = dis.score >= 1;
     if (distressing) reasons.push('distressing: ' + dis.labels.slice(0, 4).join(', '));
 
-    const informational = info.score >= 1 || isNews || (political && !laugh.score);
+    const informational = info.score >= 1 || isNews || (political && !laugh.score) || !!hint.info;
     if (info.labels.length) reasons.push('informational: ' + info.labels.slice(0, 4).join(', '));
 
     // --- needs -------------------------------------------------------------
@@ -315,18 +388,45 @@
     if (inspire.score && !distressing) needs.add('inspire');
     if (comfort.score && gentle && !political) needs.add('comfort');
 
+    // --- content types -----------------------------------------------------
+    const types = new Set(hint.types || []);
+    for (const k of Object.keys(COMPILED_TYPES)) if (hits(COMPILED_TYPES[k], text).length) types.add(k);
+    const musicScore = score(COMPILED.music, text).score + (/ - topic$|vevo$/i.test(channel.trim()) ? 2 : 0);
+    const music = !!hint.music || musicScore >= 2 || (musicScore >= 1 && dur != null && dur <= 8 * 60 && !info.score);
+    if (music) { types.add('music'); reasons.push('music'); }
+    if (political || isNews) types.add('news');
+    if (parasocial >= 2) types.add('vlogs');
+    const emo = score(COMPILED.emotional, titleLc);
+    const emotional = emo.score >= 1 || heavyTheme.score >= 1;
+    if (emo.labels.length) reasons.push('emotional: ' + emo.labels.slice(0, 3).join(', '));
+    if (emotional) types.add('emotional');
+    if (types.has('comedy') && types.has('making') && !info.score) types.delete('making'); // a sketch about cooking
+    if (!informational) types.delete('curiosity');
+    if (types.has('essays') || types.has('lectures')) types.delete('curiosity');
+
     // --- cognitive load ----------------------------------------------------
-    let load = 0;
-    if (informational) {
-      load = 1;
-      if (deep.score) load = 2;
-      if (dur != null && dur >= 25 * 60) load = 2;
-      if (dur != null && dur <= 8 * 60 && !deep.score) load = 1;
+    // Default is "medium": a video is only "easy" when there is a clear sign
+    // that it is light (music, ambience, comedy, animals, gaming, cozy …).
+    const typeList = Array.from(types);
+    const EASY = typeList.filter(t => TYPE_DEFS[t].load === 0);
+    const easyOnly = typeList.length > 0 && EASY.length === typeList.length;
+    let load;
+    if (types.has('essays') || types.has('lectures') || deep.score) load = 2;
+    else if (easyOnly && !informational) load = 0;
+    else load = 1;
+    if (relax.score && !informational && !political && !isNews && !emotional) load = 0;
+    if (dur != null) {
+      const long = types.has('ambient') || types.has('music');
+      if (load === 1 && dur >= 25 * 60 && !long && (informational || !typeList.length || types.has('podcasts'))) { load = 2; reasons.push('long and informational'); }
+      if (load === 0 && dur >= 60 * 60 && !long) { load = 1; reasons.push('over an hour'); }
+      if (informational && dur <= 8 * 60 && !deep.score && !types.has('lectures') && !types.has('essays')) load = Math.min(load, 1);
     }
-    if (needs.has('create') && load === 0) load = 1;
-    if (political || isNews || distressing) load = Math.max(load, 1);
-    if (relax.score && !informational) load = 0;
+    const cx = titleComplexity(title);
+    if (cx >= 2 && load < 2) { load++; reasons.push('complex title'); }
+    else if (cx === 1 && load === 0 && !easyOnly) { load = 1; reasons.push('complex title'); }
+    if (emotional && load === 0 && !music) load = 1;
     if (meta.isShort) load = Math.min(load, 1);
+    if (needs.has('create') && load === 0) load = 1;
 
     if (informational) {
       if (load <= 1 && !political && !isNews) needs.add('curious');
@@ -348,7 +448,7 @@
     if (political && !topics.includes('politics')) topics.push('politics');
     if (isNews && !topics.includes('news')) topics.push('news');
 
-    const known = needs.size > 0 || informational || political || isNews || distressing || heavyTheme.score > 0 ||
+    const known = needs.size > 0 || informational || political || isNews || distressing || heavyTheme.score > 0 || typeList.length > 0 ||
       parasocial > 0 || addictive > 0;
 
     return {
@@ -357,6 +457,9 @@
       tone,
       political,
       news: isNews,
+      music,
+      emotional,
+      types: typeList,
       distressing,
       parasocial,
       addictive,
@@ -373,7 +476,7 @@
   function mergeAi(base, ai) {
     if (!ai) return base;
     const out = Object.assign({}, base);
-    for (const k of ['needs', 'load', 'tone', 'political', 'news', 'distressing', 'informational', 'topics']) {
+    for (const k of ['needs', 'load', 'tone', 'political', 'news', 'distressing', 'informational', 'topics', 'music', 'emotional', 'types']) {
       if (ai[k] !== undefined && ai[k] !== null) out[k] = ai[k];
     }
     if (typeof ai.parasocial === 'boolean') out.parasocial = ai.parasocial ? Math.max(2, base.parasocial) : 0;
@@ -384,6 +487,6 @@
     return out;
   }
 
-  root.MindfulClassifier = { classify, mergeAi, parseDuration, NEEDS, TOPICS: Object.keys(TOPICS), LEX };
+  root.MindfulClassifier = { classify, mergeAi, parseDuration, titleComplexity, NEEDS, TOPICS: Object.keys(TOPICS), TYPES: Object.keys(TYPE_DEFS), TYPE_DEFS, LEX };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulClassifier;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

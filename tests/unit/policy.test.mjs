@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import '../../core/classifier.js';
 import '../../core/policy.js';
+import '../../core/profile.js';
 
 const C = globalThis.MindfulClassifier;
 const P = globalThis.MindfulPolicy;
@@ -148,4 +149,29 @@ test('custom mood without a base need only shows what you taught it', () => {
   const s = settings(null, { need: 'custom', loads: [0, 1, 2], tone: 'any', strictNeed: true });
   assert.equal(run('Relaxing piano music for a calm evening', s).action, 'hide');
   assert.equal(run('Relaxing piano music for a calm evening', s, { learned: { verdict: 'yes', score: 3 } }).action, 'show');
+});
+
+test('categories: music / emotional / news can be hidden, allowed, or be the only thing', () => {
+  const song = { durationText: '3:30', channel: 'ArtistVEVO' };
+  assert.equal(run('Artist - Song (Official Music Video)', settings('unwind', { music: 'hide' }), {}, song).action, 'hide');
+  assert.equal(run('Artist - Song (Official Music Video)', settings('unwind', { music: 'only' }), {}, song).action, 'show');
+  assert.match(run('Funny sketch about dogs', settings('unwind', { music: 'only' })).reason, /only that/);
+  assert.equal(run('Sad songs for when you miss someone', settings('drained')).action, 'hide', 'emotional hidden when drained');
+  assert.equal(run('Breaking news: storm hits the coast', settings('unwind', { news: 'only', politics: 'show', tone: 'any' })).action, 'show');
+});
+
+test('mood profile: liked types fit the mood, avoided types, length limit and own words', () => {
+  const s = settings('drained');
+  const mp = { like: ['gaming'], avoid: ['comedy'], maxMinutes: 20, likeWords: ['bob ross'], avoidWords: ['minecraft'] };
+  assert.equal(run('Stardew Valley let\'s play', s, { moodProfile: mp }, { durationText: '15:00' }).action, 'show', 'gaming helps you when drained');
+  assert.equal(run('Stardew Valley let\'s play', s, {}, { durationText: '15:00' }).action, 'hide', 'without your answers it is not clearly relaxing');
+  assert.match(run('Stardew Valley let\'s play', s, { moodProfile: mp }, { durationText: '35:00' }).reason, /longer than 20 min/);
+  assert.match(run('Funny sketch about dogs', s, { moodProfile: mp }).reason, /doesn't help in this mood/);
+  assert.match(run('Minecraft but chill', s, { moodProfile: mp }).reason, /keep that away/);
+  assert.equal(run('Bob Ross – Happy little trees', s, { moodProfile: mp }).action, 'show');
+});
+
+test('unclear decisions are flagged so details can be looked up', () => {
+  assert.equal(run('Aurora borealis over Lofoten', settings('drained')).unclear, true);
+  assert.equal(run('Senator DESTROYS reporter', settings('drained')).unclear, undefined);
 });

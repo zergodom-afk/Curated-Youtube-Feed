@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-export const ORDER = ['classifier.js', 'extractor.js', 'policy.js', 'learner.js', 'curator.js'];
+export const ORDER = ['classifier.js', 'extractor.js', 'policy.js', 'learner.js', 'profile.js', 'curator.js'];
 
 export function bundle() {
   return ORDER.map(f => `// ---- core/${f} ----\n` + readFileSync(join(root, 'core', f), 'utf8')).join('\n;\n');

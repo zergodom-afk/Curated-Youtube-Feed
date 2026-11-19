@@ -89,7 +89,40 @@ handles them differently:
   your current capacity, not a list.
 - A **＋ Later shelf** chip on every video replaces Watch Later.
 
-**5. Teach it what fits you (works without an API key)**
+**5. Setup questions: what each mood means to you**
+
+A short guided setup, offered the first time and under 🎓 Teach. It takes about
+5 minutes because most answers are pre-filled. It asks:
+
+- **What's effortless for you** when you're worn out, and what is always
+  mental work. Difficulty labels are then *yours*: if gaming is easy for you,
+  it's easy, and essays you find demanding are demanding.
+- **What tires you**: long videos, information density, jargon, fast editing,
+  emotional topics, conflict. Videos with those traits count as more
+  demanding. It also asks from what length a video feels like a commitment.
+- **Mood repair or mood matching.** When you're low, do you want to be lifted,
+  or met where you are (sad songs, quiet stories)? This decides whether
+  emotional content appears in your low moods.
+- **How news and politics leave you**, and whether "keep-me-company" creators
+  recharge you or leave you empty.
+- **For each mood**: what actually helps, what makes it worse, how long videos
+  may be, and your own words or channels to include or keep away.
+
+You can adjust a single mood later with "✎ Adjust what this mood shows".
+
+**Categories.** Music, emotional (emotionally taxing, or dwelling in a
+feeling), political and news can each be *hidden*, *allowed*, or set to
+*only this* in any mood.
+
+**Better on its own.** Difficulty is estimated from the content type (17
+types, from ambient and music to lectures and podcasts), length and how
+academic the title reads. Unknown videos count as "medium", not "easy". For
+videos it is unsure about, the app asks YouTube for the video's category and
+tags: one small request each, only for those videos, cached. Those videos
+stay hidden until the answer arrives. Transcripts are not used, because
+fetching them for every video would be slow.
+
+**6. Teach it what fits you (works without an API key)**
 
 The same video can lift one person and weigh on another. Tap the
 **👍👎 label** under any video, or **"Fits my mode?"** while watching, and say
@@ -122,7 +155,7 @@ demanding, too shallow, political, parasocial, clickbait, or wrong vibe.
   classification request, so its labels match your sense of "heavy" or
   "uplifting".
 
-**6. Transparency.** The *Filtered* tab lists every video the algorithm wanted
+**7. Transparency.** The *Filtered* tab lists every video the algorithm wanted
 to show you and why it didn't. Tap one to watch it anyway, or trust its channel.
 Optional labels on each video show what it is (🌿 easy · light, 📚 demanding …).
 

@@ -22,7 +22,9 @@
     loads: [0, 1],        // allowed cognitive load: 0 easy, 1 medium, 2 demanding
     tone: 'balanced',     // light | balanced | any
     politics: 'hide',     // hide | show | only
-    news: 'hide',         // hide | show
+    news: 'hide',         // hide | show | only
+    music: 'show',        // hide | show | only
+    emotional: 'show',    // hide | show | only – emotionally taxing or "dwelling in a feeling" content
     distressing: 'hide',  // hide | show
     // ---- protections ----
     blockParasocial: true,
@@ -35,6 +37,7 @@
     strictNeed: true,     // only videos that clearly match the chosen need (unclassified ones are hidden)
     includeNoMood: false, // also show videos you sorted into "fits no mood"
     autoFill: true,       // keep fetching more from YouTube while the feed is nearly empty
+    enrich: true,         // look up YouTube's category / tags for videos the filter is unsure about
     // ---- watch page ----
     hideRelated: true,
     hideEndscreens: true,
@@ -70,27 +73,27 @@
   const PRESETS = {
     drained: {
       emoji: '😮‍💨', label: 'Drained', hint: 'Only calm, easy, light things. No news, no heavy stuff.',
-      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     anxious: {
       emoji: '😟', label: 'Anxious / overwhelmed', hint: 'Soothing and comforting. Nothing alarming.',
-      set: { need: 'comfort', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'comfort', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     unwind: {
       emoji: '🛋️', label: 'Just unwinding', hint: 'Easy entertainment, light curiosity.',
-      set: { need: 'any', loads: [0, 1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'any', loads: [0, 1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'show' },
     },
     laugh: {
       emoji: '😂', label: 'Need a laugh', hint: 'Comedy, wholesome and fun.',
-      set: { need: 'laugh', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'laugh', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     curious: {
       emoji: '🤔', label: 'Curious', hint: 'Interesting things, not too demanding.',
-      set: { need: 'curious', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'curious', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'hide', emotional: 'show' },
     },
     focused: {
       emoji: '🧠', label: 'Focused – ready to learn', hint: 'Medium and deep content only. You pick: political or not.',
-      set: { need: 'learn', loads: [1, 2], tone: 'any', politics: 'hide', news: 'hide', distressing: 'show', strictNeed: true },
+      set: { need: 'learn', loads: [1, 2], tone: 'any', politics: 'hide', news: 'hide', distressing: 'show', strictNeed: true, music: 'hide', emotional: 'show' },
       // Follow-up question in the check-in.
       ask: {
         question: 'Which topics are you up for?',
@@ -103,19 +106,20 @@
     },
     creative: {
       emoji: '🛠️', label: 'Want to make something', hint: 'Recipes, DIY, workouts, tutorials.',
-      set: { need: 'create', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'create', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'show' },
     },
     lowMotivation: {
       emoji: '🌱', label: 'Need a lift', hint: 'Encouraging, inspiring, hopeful.',
-      set: { need: 'inspire', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'inspire', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     sleep: {
       emoji: '🌙', label: 'Winding down for sleep', hint: 'Calm, slow, nothing stimulating.',
-      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
   };
 
   const LOAD_LABELS = ['easy', 'medium', 'demanding'];
+  const CATEGORY_LABELS = { politics: 'political', news: 'news', music: 'music', emotional: 'emotionally heavy' };
   function loadsOf(s) {
     const l = Array.isArray(s.loads) ? s.loads.filter(x => x === 0 || x === 1 || x === 2) : [];
     return l.length ? l : [0, 1, 2];
@@ -182,15 +186,39 @@
     if (L && L.explicit === 1) return { action: 'show', reason: 'you said this fits' };
     if (L && L.explicit === -1) return { action: 'hide', reason: "you said this doesn't fit this mode" };
 
-    // Your explicit content switches.
-    if (s.politics === 'hide' && p.political) return { action: 'hide', reason: 'political (you chose apolitical)' };
-    if (s.politics === 'only' && !p.political && !p.news) return { action: 'hide', reason: 'not political (you chose political topics only)' };
-    if (s.news === 'hide' && p.news) return { action: 'hide', reason: 'news (you chose no news)' };
+    // Your explicit content switches: hide / allow / only, per category.
+    const cats = { politics: !!p.political, news: !!p.news, music: !!p.music, emotional: !!p.emotional };
+    for (const c of Object.keys(cats)) {
+      if (s[c] === 'hide' && cats[c]) return { action: 'hide', reason: CATEGORY_LABELS[c] + ' (hidden in this mood)' };
+    }
+    const only = Object.keys(cats).filter(c => s[c] === 'only');
+    // "Only political" also accepts news, which is mostly political.
+    if (only.length && !only.some(c => cats[c] || (c === 'politics' && cats.news))) {
+      return { action: 'hide', reason: 'not ' + only.map(c => CATEGORY_LABELS[c]).join(' / ') + ' (this mood shows only that)' };
+    }
     if (s.distressing === 'hide' && p.distressing) return { action: 'hide', reason: 'distressing content' };
     const topicsOnly = (s.topicsOnly || []).filter(Boolean);
     if (topicsOnly.length) {
       const match = (p.topics || []).some(t => listHas(topicsOnly, t));
       if (!match && ((p.topics || []).length || s.strictTopics)) return { action: 'hide', reason: 'not in your chosen topics' };
+    }
+
+    // What this mood means to you (setup questionnaire).
+    const mp = ctx.moodProfile || null;
+    let liked = false;
+    if (mp) {
+      const types = p.types || [];
+      const hay = ((meta.title || '') + ' ' + (meta.channel || '')).toLowerCase();
+      const kwOut = (mp.avoidWords || []).find(w => w && hay.includes(String(w).toLowerCase()));
+      if (kwOut) return { action: 'hide', reason: '"' + kwOut + '" – you keep that away in this mood' };
+      const kwIn = (mp.likeWords || []).find(w => w && hay.includes(String(w).toLowerCase()));
+      const typeIn = types.find(t => (mp.like || []).includes(t));
+      const typeOut = types.find(t => (mp.avoid || []).includes(t));
+      if (typeOut && !kwIn && !(L && L.verdict === 'yes')) return { action: 'hide', reason: (TYPE_LABEL(typeOut)) + " – you said that doesn't help in this mood" };
+      if (mp.maxMinutes && p.durationSec != null && p.durationSec > mp.maxMinutes * 60 && !(L && L.verdict === 'yes')) {
+        return { action: 'hide', reason: 'longer than ' + mp.maxMinutes + ' min – your limit for this mood' };
+      }
+      liked = !!(kwIn || typeIn);
     }
 
     // What the learner picked up from your feedback on similar videos.
@@ -225,24 +253,29 @@
 
     if (!loads.includes(p.load)) {
       return p.load > maxLoad
-        ? { action: 'hide', reason: 'more demanding than your current capacity' }
-        : { action: 'hide', reason: (LOAD_LABELS[p.load] || 'too light') + ' – too light for this mode' };
+        ? { action: 'hide', reason: 'more demanding than your current capacity', unclear: !p.known }
+        : { action: 'hide', reason: (LOAD_LABELS[p.load] || 'too light') + ' – too light for this mode', unclear: !p.known };
     }
-    if (s.tone === 'light' && p.tone !== 'light' && (p.known || s.strictNeed)) return { action: 'hide', reason: 'not clearly light-hearted (' + p.tone + ')' };
+    if (s.tone === 'light' && p.tone !== 'light' && (p.known || s.strictNeed) && !(liked && p.tone !== 'heavy')) return { action: 'hide', reason: 'not clearly light-hearted (' + p.tone + ')', unclear: !p.known };
     if (s.tone === 'balanced' && p.tone === 'heavy') return { action: 'hide', reason: 'heavy tone' };
 
     if (s.need !== 'any') {
       const accepted = NEED_MATCH[s.need] || [s.need];
-      const ok = (p.needs || []).some(n => accepted.includes(n));
+      const ok = liked || (p.needs || []).some(n => accepted.includes(n));
       if (!ok) {
         if ((p.needs || []).length || p.informational || s.strictNeed) {
-          return { action: 'hide', reason: (p.known ? "doesn't serve " : 'not clearly ') + (NEED_LABELS[s.need] || s.need).toLowerCase() };
+          return { action: 'hide', reason: (p.known ? "doesn't serve " : 'not clearly ') + (NEED_LABELS[s.need] || s.need).toLowerCase(), unclear: !p.known };
         }
         // unknown → only allowed if it is at least plausibly gentle
         if (maxLoad === 0 && p.tone === 'heavy') return { action: 'hide', reason: 'heavy tone' };
       }
     }
-    return { action: 'show', reason: p.known ? 'fits: ' + ((p.needs || []).join(', ') || p.tone) : 'unclassified – shown' };
+    return { action: 'show', reason: liked ? 'what helps you in this mood' : p.known ? 'fits: ' + ((p.needs || []).join(', ') || p.tone) : 'unclassified – shown' };
+  }
+  function TYPE_LABEL(t) {
+    const C = root.MindfulClassifier;
+    const d = C && C.TYPE_DEFS && C.TYPE_DEFS[t];
+    return d ? d.label : t;
   }
 
   function firstReason(p, re) {
@@ -303,6 +336,6 @@
     return out;
   }
 
-  root.MindfulPolicy = { DEFAULTS, PRESETS, NEED_LABELS, NEED_MATCH, LOAD_LABELS, decide, shelfAdd, shelfExpire, shelfNext, merge, loadsOf, maxLoadOf };
+  root.MindfulPolicy = { DEFAULTS, PRESETS, NEED_LABELS, NEED_MATCH, LOAD_LABELS, CATEGORY_LABELS, decide, shelfAdd, shelfExpire, shelfNext, merge, loadsOf, maxLoadOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulPolicy;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

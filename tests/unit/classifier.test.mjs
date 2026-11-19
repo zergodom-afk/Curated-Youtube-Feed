@@ -87,3 +87,34 @@ test('parseDuration', () => {
   assert.equal(C.parseDuration('4:05'), 245);
   assert.equal(C.parseDuration('LIVE'), null);
 });
+
+test('difficulty: demanding topics are not "easy" just because keywords are missing', () => {
+  assert.equal(cls('The Most Misunderstood Concept in Physics', { channel: 'Veritasium', durationText: '27:15' }).load, 2);
+  assert.equal(cls('Wittgenstein and the Philosophy of Language').load, 2);
+  assert.equal(cls('Lex Fridman Podcast #400', { durationText: '3:12:00' }).load, 2);
+  assert.equal(cls('Untitled video', { durationText: '12:00' }).load, 1, 'unknown = medium, not easy');
+  assert.equal(cls('I spent 100 days in Minecraft Hardcore', { durationText: '41:00' }).load, 0);
+  assert.ok(C.titleComplexity('Epistemology and the Phenomenology of Perception') >= 2);
+});
+
+test('music and emotional are detected as categories', () => {
+  const m = cls('Taylor Swift - Anti-Hero (Official Music Video)', { channel: 'TaylorSwiftVEVO', durationText: '4:01' });
+  assert.equal(m.music, true);
+  assert.ok(m.types.includes('music'));
+  assert.equal(m.load, 0);
+  const e = cls('Sad songs for when you miss someone');
+  assert.equal(e.emotional, true);
+  assert.ok(e.types.includes('emotional'));
+  assert.equal(cls('Funny cat compilation').emotional, false);
+});
+
+test('YouTube category and tags (looked up for unclear videos) sharpen the labels', () => {
+  const plain = cls('Aurora borealis over Lofoten');
+  assert.ok(!plain.types.includes('music'));
+  const withCat = cls('Aurora borealis over Lofoten', { category: 'Music', tags: ['ambient', 'relaxing music'] });
+  assert.equal(withCat.music, true);
+  assert.ok(withCat.types.includes('ambient'));
+  assert.equal(withCat.load, 0);
+  const edu = cls('Aurora borealis over Lofoten', { category: 'Education' });
+  assert.equal(edu.informational, true);
+});

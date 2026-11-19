@@ -40,7 +40,14 @@ class AiClassifier(apiKey: String) {
      *                  used to calibrate labels to this person
      * @return          [{id,needs,load,tone,political,news,distressing,parasocial,addictive,informational,topics,reason}]
      */
-    fun classify(model: String, items: JSONArray, needs: List<String>, topics: List<String>, feedback: JSONArray = JSONArray()): JSONArray {
+    fun classify(
+        model: String,
+        items: JSONArray,
+        needs: List<String>,
+        topics: List<String>,
+        feedback: JSONArray = JSONArray(),
+        types: List<String> = emptyList(),
+    ): JSONArray {
         val calibration = if (feedback.length() == 0) "" else
             "This viewer has told the app how earlier videos felt to them. Use it to calibrate your labels " +
                 "for similar videos (e.g. if they found a theme too heavy to be uplifting, label similar videos " +
@@ -57,7 +64,7 @@ class AiClassifier(apiKey: String) {
                 BetaOutputConfig.builder()
                     // Short, well-defined labelling task: low effort keeps it fast and cheap.
                     .effort(BetaOutputConfig.Effort.LOW)
-                    .format(BetaJsonOutputFormat.builder().schema(schema(needs, topics)).build())
+                    .format(BetaJsonOutputFormat.builder().schema(schema(needs, topics, types)).build())
                     .build()
             )
         // Server-side refusal fallback (the Haiku tier has no server-side fallback).
@@ -98,7 +105,7 @@ class AiClassifier(apiKey: String) {
         return out
     }
 
-    private fun schema(needs: List<String>, topics: List<String>): BetaJsonOutputFormat.Schema {
+    private fun schema(needs: List<String>, topics: List<String>, types: List<String>): BetaJsonOutputFormat.Schema {
         fun str() = mapOf("type" to "string")
         fun bool() = mapOf("type" to "boolean")
         fun enumArray(values: List<String>) = mapOf("type" to "array", "items" to mapOf("type" to "string", "enum" to values))
@@ -109,11 +116,14 @@ class AiClassifier(apiKey: String) {
             "tone" to mapOf("type" to "string", "enum" to listOf("light", "neutral", "heavy")),
             "political" to bool(),
             "news" to bool(),
+            "music" to bool(),
+            "emotional" to bool(),
             "distressing" to bool(),
             "parasocial" to bool(),
             "addictive" to bool(),
             "informational" to bool(),
             "topics" to enumArray(topics),
+            "types" to if (types.isEmpty()) mapOf("type" to "array", "items" to str()) else enumArray(types),
             "reason" to str(),
         )
         val item = mapOf(
@@ -152,6 +162,9 @@ class AiClassifier(apiKey: String) {
             - tone: light, neutral or heavy (heavy = conflict, outrage, fear, grief, bad news).
             - political: about politics, elections, politicians, geopolitics, culture-war topics.
             - news: current-events news coverage.
+            - music: mainly music (songs, music videos, live sets, mixes).
+            - emotional: emotionally taxing, or content that keeps the viewer dwelling in a feeling
+              (grief, heartbreak, sad songs, personal struggle stories, tearjerkers).
             - distressing: crime, violence, war, disasters, horror, graphic or disturbing material.
             - parasocial: mainly built on the viewer's relationship with a personality rather than on content:
               personal vlogs, life updates, drama, call-outs, reaction videos, stream VODs, "we need to talk".
@@ -159,6 +172,7 @@ class AiClassifier(apiKey: String) {
               pranks, "wait for it", endless compilations.
             - informational: the main value is information or explanation.
             - topics: zero or more of the allowed topic labels.
+            - types: what kind of video it is, zero or more of the allowed content types.
             - reason: at most 12 words explaining the most important label.
         """.trimIndent()
     }

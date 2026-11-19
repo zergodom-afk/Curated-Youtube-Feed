@@ -101,6 +101,22 @@
       'quarter life crisis', 'void', 'death of', 'dying', 'nobody cares', 'traurig', 'einsam*', 'angst',
       'gefahr*', 'sinnlos*',
     ],
+    music: [
+      'music', 'song', 'songs', 'official video', 'official music video', 'official audio', 'lyric*',
+      'audio', 'album', 'live session', 'acoustic', 'remix', 'lofi', 'lo-fi', 'beats', 'soundtrack',
+      'ost', 'playlist', 'concert', 'live at', 'unplugged', 'cover', 'feat', 'ft', 'piano', 'guitar',
+      'symphony', 'orchestra', 'jazz', 'classical music', 'hip hop', 'rap', 'techno', 'house mix', 'dj set',
+      'musik', 'lied', 'single',
+    ],
+    // Emotionally taxing, or content that keeps you dwelling in a feeling.
+    emotional: [
+      'emotional', 'heartbreak*', 'heartbroken', 'tearjerker', 'tear jerker', 'will make you cry', 'cry', 'crying',
+      'cried', 'tears', 'sad', 'sad songs', 'saddest', 'melanchol*', 'nostalgi*', 'grief', 'griev*', 'loss of',
+      'goodbye', 'farewell', 'miss you', 'missing you', 'lonely', 'loneliness', 'breakup', 'broke up',
+      'broken heart', 'trauma*', 'my story', 'struggl*', 'depress*', 'anxiety', 'panic attack', 'healing',
+      'therapy', 'vent', 'venting', 'vulnerable', 'final days', 'last words', 'touching', 'heartwarming',
+      'moving story', 'traurig', 'weinen', 'abschied', 'herzschmerz', 'einsam*',
+    ],
     relax: [
       'relax*', 'calm*', 'ambient', 'ambience', 'asmr', 'lofi', 'lo-fi', 'chill*', 'sleep*',
       'meditat*', 'breathing', 'yoga', 'nature sounds', 'rain sounds', 'rain', 'ocean waves',
@@ -193,6 +209,30 @@
 
   const NEEDS = ['relax', 'laugh', 'curious', 'learn', 'create', 'inspire', 'comfort'];
 
+  // Content types – what a video *is*. Used for difficulty, for the setup
+  // questionnaire ("what helps when you're drained?") and for your moods.
+  // load: typical difficulty (0 easy, 1 medium, 2 demanding) before personal calibration.
+  const TYPE_DEFS = {
+    ambient: { emoji: '🌧️', label: 'Ambient & nature sounds', load: 0, words: ['ambient', 'ambience', 'rain sounds', 'nature sounds', 'white noise', 'brown noise', 'slow tv', 'fireplace', 'ocean waves', 'birdsong', 'forest sounds', '4k walk', 'walking tour', 'train ride', 'aquarium', 'asmr', 'sleep sounds', 'study with me', 'lofi', 'lo-fi'] },
+    music: { emoji: '🎵', label: 'Music', load: 0, words: [] },
+    comedy: { emoji: '😂', label: 'Comedy & sketches', load: 0, words: ['funny', 'comedy', 'comedian', 'sketch', 'stand-up', 'standup', 'parody', 'satire', 'bloopers', 'outtakes', 'improv', 'hilarious', 'memes', 'sitcom', 'lustig'] },
+    animals: { emoji: '🐾', label: 'Animals', load: 0, words: ['cat', 'cats', 'kitten*', 'dog', 'dogs', 'puppy', 'puppies', 'animal*', 'wildlife', 'bird*', 'otter*', 'pet', 'pets', 'rescue', 'zoo', 'tiere'] },
+    gaming: { emoji: '🎮', label: 'Gaming & let\'s plays', load: 0, words: ["let's play", 'lets play', 'gameplay', 'playthrough', 'walkthrough', 'speedrun', 'minecraft', 'stardew', 'zelda', 'pokemon', 'nintendo', 'gaming', 'stream highlights', 'no commentary'] },
+    cozy: { emoji: '🫖', label: 'Cozy & slow living', load: 0, words: ['cozy', 'cosy', 'slow living', 'cottage*', 'cottagecore', 'hygge', 'gardening', 'garden tour', 'cleaning', 'organizing', 'organising', 'morning routine', 'quiet day', 'peaceful day', 'gemütlich'] },
+    making: { emoji: '🍳', label: 'Cooking, crafts & DIY', load: 1, words: ['recipe*', 'cooking', 'baking', 'bake', 'diy', 'how to make', 'woodworking', 'craft*', 'knitting', 'crochet', 'sewing', 'pottery', 'restoration', 'restoring', 'repair*', 'build*', 'rezept*', 'kochen', 'backen'] },
+    sports: { emoji: '⚽', label: 'Sports', load: 1, words: ['football', 'soccer', 'basketball', 'nba', 'nfl', 'tennis', 'f1', 'formula 1', 'highlights', 'match', 'goals', 'bundesliga', 'champions league', 'ufc', 'boxing', 'cycling', 'climbing', 'workout', 'fitness'] },
+    travel: { emoji: '✈️', label: 'Travel & places', load: 0, words: ['travel*', 'trip', 'road trip', 'backpacking', 'exploring', 'visit*', 'tour of', 'city walk', 'island', 'van life', 'reise*'] },
+    curiosity: { emoji: '🤔', label: 'Light explainers & fun facts', load: 1, words: ['explained', 'how does', 'why do', 'why does', 'why is', 'what if', 'what happens', 'fun facts', 'facts', 'did you know', 'how it works', 'in 5 minutes', 'in 10 minutes', 'erklärt'] },
+    essays: { emoji: '🎬', label: 'Video essays & documentaries', load: 2, words: ['video essay', 'essay', 'documentary', 'doku*', 'dokumentation', 'the story of', 'rise and fall', 'deep dive', 'analysis', 'retrospective', 'history of', 'the truth about', 'investigat*', 'breakdown'] },
+    lectures: { emoji: '🎓', label: 'Lectures, courses & tutorials', load: 2, words: ['lecture', 'full course', 'course', 'lesson*', 'masterclass', 'seminar', 'university', 'tutorial', 'crash course', 'online class', 'introduction to', 'intro to', 'vorlesung', 'webinar', 'conference talk'] },
+    podcasts: { emoji: '🎙️', label: 'Podcasts & interviews', load: 1, words: ['podcast', 'interview', 'in conversation', 'conversation with', 'episode', 'ep.', 'q&a with', 'panel', 'talk show', 'roundtable'] },
+    news: { emoji: '📰', label: 'News & politics', load: 1, words: [] },
+    vlogs: { emoji: '📹', label: 'Vlogs & creator life', load: 0, words: [] },
+    motivation: { emoji: '🌱', label: 'Motivation & self-improvement', load: 1, words: ['motivation*', 'self improvement', 'self-improvement', 'productivity', 'habits', 'discipline', 'mindset', 'success', 'inspir*', 'how i changed', 'glow up'] },
+    emotional: { emoji: '💧', label: 'Emotional stories', load: 1, words: [] },
+    reviews: { emoji: '🛍️', label: 'Reviews & tech', load: 1, words: ['review', 'unboxing', 'tested', 'worth it', 'comparison', 'buying guide', 'vs', 'hands-on', 'first look', 'iphone', 'android', 'laptop', 'camera'] },
+  };
+
   // ---------------------------------------------------------------------------
   // Matching helpers
   // ---------------------------------------------------------------------------
@@ -219,6 +259,35 @@
   for (const k of Object.keys(LEX)) COMPILED[k] = LEX[k].filter(e => (Array.isArray(e) ? e[1] : 1) > 0).map(compile);
   const COMPILED_TOPICS = {};
   for (const k of Object.keys(TOPICS)) COMPILED_TOPICS[k] = TOPICS[k].map(compile);
+  const COMPILED_TYPES = {};
+  for (const k of Object.keys(TYPE_DEFS)) COMPILED_TYPES[k] = TYPE_DEFS[k].words.map(compile);
+
+  // YouTube's own category (fetched for unclear videos) → strong hints.
+  const CATEGORY_HINTS = {
+    'Music': { types: ['music'], music: true },
+    'Comedy': { types: ['comedy'] },
+    'Gaming': { types: ['gaming'] },
+    'Education': { info: true },
+    'Science & Technology': { info: true },
+    'News & Politics': { news: true },
+    'Howto & Style': { types: ['making'] },
+    'Pets & Animals': { types: ['animals'] },
+    'Sports': { types: ['sports'] },
+    'Travel & Events': { types: ['travel'] },
+    'People & Blogs': { parasocial: 1 },
+    'Nonprofits & Activism': { info: true },
+  };
+
+  /** How "academic" a title reads: long words, jargon, many words. */
+  function titleComplexity(title) {
+    const words = String(title || '').match(/[A-Za-z\u00C0-\u024F]+/g) || [];
+    let c = 0;
+    if (words.filter(w => w.length >= 11).length >= 2) c++;
+    if (/\b[a-z]+(ology|ologies|ism|isms|ization|isation|ometry|ological|istic|ivity)\b/i.test(title)) c++;
+    if (/\b(theor(y|em|ies)|paradox|hypothes[ie]s|equation|proof|framework|mechanism|epistemolog|ontolog|thermodynamic|quantum|algorithm|neural|macroeconom|geopolitic|dialectic|phenomenolog|semiotic|calculus|topolog|cognitive)/i.test(title)) c++;
+    if (words.length >= 13) c++;
+    return c;
+  }
 
   function hits(list, text) {
     const out = [];
@@ -261,13 +330,17 @@
    */
   function classify(meta) {
     meta = meta || {};
+    const reasons_pre = [];
     const title = String(meta.title || '');
     const channel = String(meta.channel || '');
     const desc = String(meta.description || '');
-    const text = (title + ' \n ' + channel + ' \n ' + desc).toLowerCase();
+    const tags = Array.isArray(meta.tags) ? meta.tags.join(' · ') : '';
+    const text = (title + ' \n ' + channel + ' \n ' + desc + ' \n ' + tags).toLowerCase();
+    const hint = CATEGORY_HINTS[meta.category] || {};
+    if (meta.category) reasons_pre.push('YouTube category: ' + meta.category);
     const titleLc = (title + ' \n ' + channel).toLowerCase();
     const dur = meta.durationSec != null ? meta.durationSec : parseDuration(meta.durationText);
-    const reasons = [];
+    const reasons = reasons_pre;
 
     const pol = score(COMPILED.political, titleLc);
     const news = score(COMPILED.news, titleLc);
@@ -290,19 +363,19 @@
     if (typo.labels.length) reasons.push('typography: ' + typo.labels.join(', '));
     if (meta.isShort) { addictive += 5; reasons.push('Short'); }
 
-    let parasocial = para.score;
+    let parasocial = para.score + (hint.parasocial || 0);
     if (para.labels.length) reasons.push('parasocial: ' + para.labels.join(', '));
     // Very long streams/VODs are typically companionship content.
     if (dur != null && dur > 3 * 3600 && !relax.score) { parasocial += 1; reasons.push('very long stream'); }
 
     const political = pol.score >= 1;
     if (political) reasons.push('political: ' + pol.labels.slice(0, 4).join(', '));
-    const isNews = news.score >= 1;
+    const isNews = news.score >= 1 || !!hint.news;
     if (isNews) reasons.push('news');
     const distressing = dis.score >= 1;
     if (distressing) reasons.push('distressing: ' + dis.labels.slice(0, 4).join(', '));
 
-    const informational = info.score >= 1 || isNews || (political && !laugh.score);
+    const informational = info.score >= 1 || isNews || (political && !laugh.score) || !!hint.info;
     if (info.labels.length) reasons.push('informational: ' + info.labels.slice(0, 4).join(', '));
 
     // --- needs -------------------------------------------------------------
@@ -316,18 +389,45 @@
     if (inspire.score && !distressing) needs.add('inspire');
     if (comfort.score && gentle && !political) needs.add('comfort');
 
+    // --- content types -----------------------------------------------------
+    const types = new Set(hint.types || []);
+    for (const k of Object.keys(COMPILED_TYPES)) if (hits(COMPILED_TYPES[k], text).length) types.add(k);
+    const musicScore = score(COMPILED.music, text).score + (/ - topic$|vevo$/i.test(channel.trim()) ? 2 : 0);
+    const music = !!hint.music || musicScore >= 2 || (musicScore >= 1 && dur != null && dur <= 8 * 60 && !info.score);
+    if (music) { types.add('music'); reasons.push('music'); }
+    if (political || isNews) types.add('news');
+    if (parasocial >= 2) types.add('vlogs');
+    const emo = score(COMPILED.emotional, titleLc);
+    const emotional = emo.score >= 1 || heavyTheme.score >= 1;
+    if (emo.labels.length) reasons.push('emotional: ' + emo.labels.slice(0, 3).join(', '));
+    if (emotional) types.add('emotional');
+    if (types.has('comedy') && types.has('making') && !info.score) types.delete('making'); // a sketch about cooking
+    if (!informational) types.delete('curiosity');
+    if (types.has('essays') || types.has('lectures')) types.delete('curiosity');
+
     // --- cognitive load ----------------------------------------------------
-    let load = 0;
-    if (informational) {
-      load = 1;
-      if (deep.score) load = 2;
-      if (dur != null && dur >= 25 * 60) load = 2;
-      if (dur != null && dur <= 8 * 60 && !deep.score) load = 1;
+    // Default is "medium": a video is only "easy" when there is a clear sign
+    // that it is light (music, ambience, comedy, animals, gaming, cozy …).
+    const typeList = Array.from(types);
+    const EASY = typeList.filter(t => TYPE_DEFS[t].load === 0);
+    const easyOnly = typeList.length > 0 && EASY.length === typeList.length;
+    let load;
+    if (types.has('essays') || types.has('lectures') || deep.score) load = 2;
+    else if (easyOnly && !informational) load = 0;
+    else load = 1;
+    if (relax.score && !informational && !political && !isNews && !emotional) load = 0;
+    if (dur != null) {
+      const long = types.has('ambient') || types.has('music');
+      if (load === 1 && dur >= 25 * 60 && !long && (informational || !typeList.length || types.has('podcasts'))) { load = 2; reasons.push('long and informational'); }
+      if (load === 0 && dur >= 60 * 60 && !long) { load = 1; reasons.push('over an hour'); }
+      if (informational && dur <= 8 * 60 && !deep.score && !types.has('lectures') && !types.has('essays')) load = Math.min(load, 1);
     }
-    if (needs.has('create') && load === 0) load = 1;
-    if (political || isNews || distressing) load = Math.max(load, 1);
-    if (relax.score && !informational) load = 0;
+    const cx = titleComplexity(title);
+    if (cx >= 2 && load < 2) { load++; reasons.push('complex title'); }
+    else if (cx === 1 && load === 0 && !easyOnly) { load = 1; reasons.push('complex title'); }
+    if (emotional && load === 0 && !music) load = 1;
     if (meta.isShort) load = Math.min(load, 1);
+    if (needs.has('create') && load === 0) load = 1;
 
     if (informational) {
       if (load <= 1 && !political && !isNews) needs.add('curious');
@@ -349,7 +449,7 @@
     if (political && !topics.includes('politics')) topics.push('politics');
     if (isNews && !topics.includes('news')) topics.push('news');
 
-    const known = needs.size > 0 || informational || political || isNews || distressing || heavyTheme.score > 0 ||
+    const known = needs.size > 0 || informational || political || isNews || distressing || heavyTheme.score > 0 || typeList.length > 0 ||
       parasocial > 0 || addictive > 0;
 
     return {
@@ -358,6 +458,9 @@
       tone,
       political,
       news: isNews,
+      music,
+      emotional,
+      types: typeList,
       distressing,
       parasocial,
       addictive,
@@ -374,7 +477,7 @@
   function mergeAi(base, ai) {
     if (!ai) return base;
     const out = Object.assign({}, base);
-    for (const k of ['needs', 'load', 'tone', 'political', 'news', 'distressing', 'informational', 'topics']) {
+    for (const k of ['needs', 'load', 'tone', 'political', 'news', 'distressing', 'informational', 'topics', 'music', 'emotional', 'types']) {
       if (ai[k] !== undefined && ai[k] !== null) out[k] = ai[k];
     }
     if (typeof ai.parasocial === 'boolean') out.parasocial = ai.parasocial ? Math.max(2, base.parasocial) : 0;
@@ -385,7 +488,7 @@
     return out;
   }
 
-  root.MindfulClassifier = { classify, mergeAi, parseDuration, NEEDS, TOPICS: Object.keys(TOPICS), LEX };
+  root.MindfulClassifier = { classify, mergeAi, parseDuration, titleComplexity, NEEDS, TOPICS: Object.keys(TOPICS), TYPES: Object.keys(TYPE_DEFS), TYPE_DEFS, LEX };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulClassifier;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
@@ -699,7 +802,9 @@
     loads: [0, 1],        // allowed cognitive load: 0 easy, 1 medium, 2 demanding
     tone: 'balanced',     // light | balanced | any
     politics: 'hide',     // hide | show | only
-    news: 'hide',         // hide | show
+    news: 'hide',         // hide | show | only
+    music: 'show',        // hide | show | only
+    emotional: 'show',    // hide | show | only – emotionally taxing or "dwelling in a feeling" content
     distressing: 'hide',  // hide | show
     // ---- protections ----
     blockParasocial: true,
@@ -712,6 +817,7 @@
     strictNeed: true,     // only videos that clearly match the chosen need (unclassified ones are hidden)
     includeNoMood: false, // also show videos you sorted into "fits no mood"
     autoFill: true,       // keep fetching more from YouTube while the feed is nearly empty
+    enrich: true,         // look up YouTube's category / tags for videos the filter is unsure about
     // ---- watch page ----
     hideRelated: true,
     hideEndscreens: true,
@@ -747,27 +853,27 @@
   const PRESETS = {
     drained: {
       emoji: '😮‍💨', label: 'Drained', hint: 'Only calm, easy, light things. No news, no heavy stuff.',
-      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     anxious: {
       emoji: '😟', label: 'Anxious / overwhelmed', hint: 'Soothing and comforting. Nothing alarming.',
-      set: { need: 'comfort', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'comfort', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     unwind: {
       emoji: '🛋️', label: 'Just unwinding', hint: 'Easy entertainment, light curiosity.',
-      set: { need: 'any', loads: [0, 1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'any', loads: [0, 1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'show' },
     },
     laugh: {
       emoji: '😂', label: 'Need a laugh', hint: 'Comedy, wholesome and fun.',
-      set: { need: 'laugh', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'laugh', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     curious: {
       emoji: '🤔', label: 'Curious', hint: 'Interesting things, not too demanding.',
-      set: { need: 'curious', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'curious', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'hide', emotional: 'show' },
     },
     focused: {
       emoji: '🧠', label: 'Focused – ready to learn', hint: 'Medium and deep content only. You pick: political or not.',
-      set: { need: 'learn', loads: [1, 2], tone: 'any', politics: 'hide', news: 'hide', distressing: 'show', strictNeed: true },
+      set: { need: 'learn', loads: [1, 2], tone: 'any', politics: 'hide', news: 'hide', distressing: 'show', strictNeed: true, music: 'hide', emotional: 'show' },
       // Follow-up question in the check-in.
       ask: {
         question: 'Which topics are you up for?',
@@ -780,19 +886,20 @@
     },
     creative: {
       emoji: '🛠️', label: 'Want to make something', hint: 'Recipes, DIY, workouts, tutorials.',
-      set: { need: 'create', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'create', loads: [1], tone: 'balanced', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'show' },
     },
     lowMotivation: {
       emoji: '🌱', label: 'Need a lift', hint: 'Encouraging, inspiring, hopeful.',
-      set: { need: 'inspire', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'inspire', loads: [0, 1], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
     sleep: {
       emoji: '🌙', label: 'Winding down for sleep', hint: 'Calm, slow, nothing stimulating.',
-      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true },
+      set: { need: 'relax', loads: [0], tone: 'light', politics: 'hide', news: 'hide', distressing: 'hide', strictNeed: true, music: 'show', emotional: 'hide' },
     },
   };
 
   const LOAD_LABELS = ['easy', 'medium', 'demanding'];
+  const CATEGORY_LABELS = { politics: 'political', news: 'news', music: 'music', emotional: 'emotionally heavy' };
   function loadsOf(s) {
     const l = Array.isArray(s.loads) ? s.loads.filter(x => x === 0 || x === 1 || x === 2) : [];
     return l.length ? l : [0, 1, 2];
@@ -859,15 +966,39 @@
     if (L && L.explicit === 1) return { action: 'show', reason: 'you said this fits' };
     if (L && L.explicit === -1) return { action: 'hide', reason: "you said this doesn't fit this mode" };
 
-    // Your explicit content switches.
-    if (s.politics === 'hide' && p.political) return { action: 'hide', reason: 'political (you chose apolitical)' };
-    if (s.politics === 'only' && !p.political && !p.news) return { action: 'hide', reason: 'not political (you chose political topics only)' };
-    if (s.news === 'hide' && p.news) return { action: 'hide', reason: 'news (you chose no news)' };
+    // Your explicit content switches: hide / allow / only, per category.
+    const cats = { politics: !!p.political, news: !!p.news, music: !!p.music, emotional: !!p.emotional };
+    for (const c of Object.keys(cats)) {
+      if (s[c] === 'hide' && cats[c]) return { action: 'hide', reason: CATEGORY_LABELS[c] + ' (hidden in this mood)' };
+    }
+    const only = Object.keys(cats).filter(c => s[c] === 'only');
+    // "Only political" also accepts news, which is mostly political.
+    if (only.length && !only.some(c => cats[c] || (c === 'politics' && cats.news))) {
+      return { action: 'hide', reason: 'not ' + only.map(c => CATEGORY_LABELS[c]).join(' / ') + ' (this mood shows only that)' };
+    }
     if (s.distressing === 'hide' && p.distressing) return { action: 'hide', reason: 'distressing content' };
     const topicsOnly = (s.topicsOnly || []).filter(Boolean);
     if (topicsOnly.length) {
       const match = (p.topics || []).some(t => listHas(topicsOnly, t));
       if (!match && ((p.topics || []).length || s.strictTopics)) return { action: 'hide', reason: 'not in your chosen topics' };
+    }
+
+    // What this mood means to you (setup questionnaire).
+    const mp = ctx.moodProfile || null;
+    let liked = false;
+    if (mp) {
+      const types = p.types || [];
+      const hay = ((meta.title || '') + ' ' + (meta.channel || '')).toLowerCase();
+      const kwOut = (mp.avoidWords || []).find(w => w && hay.includes(String(w).toLowerCase()));
+      if (kwOut) return { action: 'hide', reason: '"' + kwOut + '" – you keep that away in this mood' };
+      const kwIn = (mp.likeWords || []).find(w => w && hay.includes(String(w).toLowerCase()));
+      const typeIn = types.find(t => (mp.like || []).includes(t));
+      const typeOut = types.find(t => (mp.avoid || []).includes(t));
+      if (typeOut && !kwIn && !(L && L.verdict === 'yes')) return { action: 'hide', reason: (TYPE_LABEL(typeOut)) + " – you said that doesn't help in this mood" };
+      if (mp.maxMinutes && p.durationSec != null && p.durationSec > mp.maxMinutes * 60 && !(L && L.verdict === 'yes')) {
+        return { action: 'hide', reason: 'longer than ' + mp.maxMinutes + ' min – your limit for this mood' };
+      }
+      liked = !!(kwIn || typeIn);
     }
 
     // What the learner picked up from your feedback on similar videos.
@@ -902,24 +1033,29 @@
 
     if (!loads.includes(p.load)) {
       return p.load > maxLoad
-        ? { action: 'hide', reason: 'more demanding than your current capacity' }
-        : { action: 'hide', reason: (LOAD_LABELS[p.load] || 'too light') + ' – too light for this mode' };
+        ? { action: 'hide', reason: 'more demanding than your current capacity', unclear: !p.known }
+        : { action: 'hide', reason: (LOAD_LABELS[p.load] || 'too light') + ' – too light for this mode', unclear: !p.known };
     }
-    if (s.tone === 'light' && p.tone !== 'light' && (p.known || s.strictNeed)) return { action: 'hide', reason: 'not clearly light-hearted (' + p.tone + ')' };
+    if (s.tone === 'light' && p.tone !== 'light' && (p.known || s.strictNeed) && !(liked && p.tone !== 'heavy')) return { action: 'hide', reason: 'not clearly light-hearted (' + p.tone + ')', unclear: !p.known };
     if (s.tone === 'balanced' && p.tone === 'heavy') return { action: 'hide', reason: 'heavy tone' };
 
     if (s.need !== 'any') {
       const accepted = NEED_MATCH[s.need] || [s.need];
-      const ok = (p.needs || []).some(n => accepted.includes(n));
+      const ok = liked || (p.needs || []).some(n => accepted.includes(n));
       if (!ok) {
         if ((p.needs || []).length || p.informational || s.strictNeed) {
-          return { action: 'hide', reason: (p.known ? "doesn't serve " : 'not clearly ') + (NEED_LABELS[s.need] || s.need).toLowerCase() };
+          return { action: 'hide', reason: (p.known ? "doesn't serve " : 'not clearly ') + (NEED_LABELS[s.need] || s.need).toLowerCase(), unclear: !p.known };
         }
         // unknown → only allowed if it is at least plausibly gentle
         if (maxLoad === 0 && p.tone === 'heavy') return { action: 'hide', reason: 'heavy tone' };
       }
     }
-    return { action: 'show', reason: p.known ? 'fits: ' + ((p.needs || []).join(', ') || p.tone) : 'unclassified – shown' };
+    return { action: 'show', reason: liked ? 'what helps you in this mood' : p.known ? 'fits: ' + ((p.needs || []).join(', ') || p.tone) : 'unclassified – shown' };
+  }
+  function TYPE_LABEL(t) {
+    const C = root.MindfulClassifier;
+    const d = C && C.TYPE_DEFS && C.TYPE_DEFS[t];
+    return d ? d.label : t;
   }
 
   function firstReason(p, re) {
@@ -980,7 +1116,7 @@
     return out;
   }
 
-  root.MindfulPolicy = { DEFAULTS, PRESETS, NEED_LABELS, NEED_MATCH, LOAD_LABELS, decide, shelfAdd, shelfExpire, shelfNext, merge, loadsOf, maxLoadOf };
+  root.MindfulPolicy = { DEFAULTS, PRESETS, NEED_LABELS, NEED_MATCH, LOAD_LABELS, CATEGORY_LABELS, decide, shelfAdd, shelfExpire, shelfNext, merge, loadsOf, maxLoadOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulPolicy;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
@@ -1265,6 +1401,194 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
 ;
+// ---- core/profile.js ----
+/*
+ * Mindful Feed – what each mood means *to you*.
+ *
+ * Built from a short setup questionnaire (and editable later):
+ *
+ *  calibration   what counts as easy / demanding for you: content types that
+ *                stay easy when you're tired, types that are always work,
+ *                what tires you (length, density, jargon, emotion, conflict)
+ *                and from what length a video feels like a commitment.
+ *  moodProfiles  per mood: content types that help, types to keep away,
+ *                maximum length, and your own words to include / avoid.
+ *  overrides     per mood setting changes that follow from your answers
+ *                (mood repair vs. mood matching, how news leaves you, …).
+ *
+ * The questions draw on well-known ideas from emotion research: people
+ * regulate mood either by *repairing* it (seeking the opposite) or by
+ * *matching* it (staying with the feeling); both are valid, so we ask.
+ * Cognitive effort depends on the person, so we ask what is effortless for
+ * you when you're tired instead of assuming it.
+ */
+(function (root) {
+  'use strict';
+
+  // Sensible defaults until you answer the questionnaire.
+  const DEFAULT_MOOD_PROFILES = {
+    drained: { like: ['ambient', 'music', 'animals', 'cozy', 'comedy'], avoid: ['essays', 'lectures', 'news', 'podcasts'] },
+    anxious: { like: ['ambient', 'animals', 'cozy', 'music'], avoid: ['news', 'essays', 'emotional'] },
+    unwind: { like: [], avoid: [] },
+    laugh: { like: ['comedy', 'animals', 'gaming'], avoid: ['news', 'essays', 'lectures'] },
+    curious: { like: ['curiosity'], avoid: ['news', 'lectures'] },
+    focused: { like: ['essays', 'lectures', 'curiosity', 'podcasts'], avoid: ['vlogs', 'comedy', 'gaming', 'music', 'ambient'] },
+    creative: { like: ['making'], avoid: ['news'] },
+    lowMotivation: { like: ['motivation'], avoid: ['news'] },
+    sleep: { like: ['ambient', 'music', 'cozy'], avoid: ['news', 'essays', 'lectures', 'gaming', 'sports'] },
+  };
+
+  const DEFAULT_CALIBRATION = { easy: [], hard: [], strain: [], lengthMin: null };
+
+  const STRAIN = {
+    long: 'Long videos',
+    dense: 'Lots of facts, numbers or information',
+    technical: 'Technical language or jargon',
+    fast: 'Fast talking or hectic editing',
+    emotional: 'Emotional topics',
+    conflict: 'Arguing, drama or conflict',
+  };
+
+  // Moods considered "low" for the mood repair vs. matching question.
+  const LOW_MOODS = ['drained', 'anxious', 'sleep', 'lowMotivation'];
+
+  /**
+   * The questionnaire, as data. `type`: multi (chips), single (cards),
+   * words (two text fields). Per-mood questions use {mood} in the text.
+   */
+  const GENERAL_QUESTIONS = [
+    {
+      id: 'easy', type: 'multi', options: 'types',
+      q: 'Think of an evening when you\'re worn out. Which of these could you still watch without effort?',
+      help: 'What feels effortless differs a lot between people – this tells Mindful Feed what "easy" means for you.',
+    },
+    {
+      id: 'hard', type: 'multi', options: 'types',
+      q: 'Which of these feel like real mental work – even on a good day?',
+      help: 'These will be treated as "demanding", so they stay out of moods where you have little energy.',
+    },
+    {
+      id: 'strain', type: 'multi', options: 'strain',
+      q: 'What makes a video tiring for you?',
+      help: 'Videos with these traits are rated one step more demanding for you.',
+    },
+    {
+      id: 'lengthMin', type: 'single',
+      q: 'From what length does a video start to feel like a commitment?',
+      options: [[10, 'About 10 minutes'], [20, 'About 20 minutes'], [40, 'About 40 minutes'], [0, 'Length doesn\'t matter to me']],
+    },
+    {
+      id: 'lowPref', type: 'single',
+      q: 'When you\'re feeling low, what usually helps you more?',
+      help: 'Psychologists call these mood repair and mood matching. Both are healthy – people just differ.',
+      options: [['lift', 'Something that lifts me – light, cheerful, warm'], ['match', 'Something that meets me where I am – sad songs, quiet stories'], ['depends', 'It really depends on the day']],
+    },
+    {
+      id: 'newsFeel', type: 'single',
+      q: 'After watching political videos or news, you usually feel…',
+      options: [['fine', 'Informed, and fine'], ['tense', 'Tense, worried or drained'], ['depends', 'It depends on my day']],
+    },
+    {
+      id: 'companyFeel', type: 'single',
+      q: 'Some creators feel like a friend keeping you company. After an hour with them, you usually feel…',
+      help: 'This decides whether vlogs and "hang out" streams are allowed in your calm moods.',
+      options: [['comfort', 'Comforted and recharged'], ['empty', 'A bit empty, or like I avoided something'], ['none', 'I don\'t really watch those']],
+    },
+    { id: 'moods', type: 'multi', options: 'moods', q: 'Which moods do you want to set up now?', help: 'You can redo this any time.' },
+  ];
+
+  const MOOD_QUESTIONS = [
+    { id: 'like', type: 'multi', options: 'types', q: 'When you feel {mood}, what actually helps you?', help: 'Think of the last time – what did you watch that left you better off afterwards?' },
+    { id: 'avoid', type: 'multi', options: 'types', q: '…and what makes it worse when you feel {mood}?' },
+    { id: 'maxMinutes', type: 'single', q: 'How long may videos be when you feel {mood}?', options: [[10, 'Up to 10 minutes'], [20, 'Up to 20 minutes'], [45, 'Up to 45 minutes'], [0, 'Any length']] },
+    { id: 'words', type: 'words', q: 'Anything specific that\'s perfect for {mood} – or that should stay away?', help: 'Optional. Words or channel names, separated by commas.' },
+  ];
+
+  function uniq(a) { return Array.from(new Set((a || []).filter(Boolean))); }
+  function words(s) { return uniq(String(s || '').split(/[,\n]/).map(x => x.trim()).filter(x => x.length > 1)); }
+
+  /** Turn questionnaire answers into calibration, mood profiles and setting overrides. */
+  function build(answers) {
+    const a = answers || {};
+    const calibration = {
+      easy: uniq(a.easy),
+      hard: uniq(a.hard).filter(t => !(a.easy || []).includes(t)),
+      strain: uniq(a.strain),
+      lengthMin: Number(a.lengthMin) || null,
+    };
+    const moodProfiles = {};
+    const overrides = {};
+    for (const key of Object.keys(a.perMood || {})) {
+      const m = a.perMood[key] || {};
+      moodProfiles[key] = {
+        like: uniq(m.like),
+        avoid: uniq(m.avoid).filter(t => !(m.like || []).includes(t)),
+        maxMinutes: Number(m.maxMinutes) || null,
+        likeWords: words(m.likeWords),
+        avoidWords: words(m.avoidWords),
+      };
+    }
+    const moods = uniq(a.moods);
+    for (const key of moods) {
+      const o = overrides[key] = {};
+      const low = LOW_MOODS.includes(key);
+      if (low && a.lowPref === 'match') o.emotional = 'show';
+      if (low && a.lowPref === 'lift') o.emotional = 'hide';
+      if (a.newsFeel === 'fine' && (key === 'curious' || key === 'unwind')) { o.politics = 'show'; o.news = 'show'; }
+      if (a.newsFeel === 'tense' && key !== 'focused') { o.politics = 'hide'; o.news = 'hide'; }
+      if (a.companyFeel === 'comfort' && (key === 'anxious' || key === 'unwind' || key === 'drained')) o.blockParasocial = false;
+      if (a.companyFeel === 'empty') o.blockParasocial = true;
+      if (!Object.keys(o).length) delete overrides[key];
+    }
+    if (a.companyFeel === 'comfort') {
+      for (const key of ['anxious', 'unwind', 'drained']) {
+        if (moodProfiles[key] && !moodProfiles[key].avoid.includes('vlogs')) moodProfiles[key].like = uniq(moodProfiles[key].like.concat(['vlogs']));
+      }
+    }
+    return { answers: a, calibration, moodProfiles, overrides, at: Date.now() };
+  }
+
+  /** Re-rate a video's difficulty with your personal calibration. */
+  function personalize(prof, meta, cal, titleComplexity) {
+    if (!cal || (!cal.easy.length && !cal.hard.length && !cal.strain.length && !cal.lengthMin)) return prof;
+    const p = Object.assign({}, prof, { reasons: (prof.reasons || []).slice() });
+    const types = p.types || [];
+    const background = types.includes('ambient') || types.includes('music');
+    const hard = types.find(t => cal.hard.includes(t));
+    if (hard) { p.load = 2; p.reasons.unshift('demanding for you: ' + hard); }
+    else if (types.length && types.every(t => cal.easy.includes(t))) { p.load = 0; p.reasons.unshift('easy for you: ' + types.join(', ')); }
+    let extra = 0; const why = [];
+    const dur = p.durationSec;
+    const longAt = (cal.lengthMin || (cal.strain.includes('long') ? 20 : 0)) * 60;
+    if (longAt && dur != null && dur > longAt && !background) { extra++; why.push('long'); }
+    if (cal.strain.includes('dense') && p.informational && (dur == null || dur > 8 * 60)) { extra++; why.push('information-dense'); }
+    if (cal.strain.includes('technical') && titleComplexity && titleComplexity(meta.title) >= 1) { extra++; why.push('technical'); }
+    if (cal.strain.includes('emotional') && p.emotional) { extra++; why.push('emotional'); }
+    if (cal.strain.includes('conflict') && (p.political || p.addictive >= 2 || p.parasocial >= 2)) { extra++; why.push('conflict / drama'); }
+    if (cal.strain.includes('fast') && (p.addictive >= 2 || types.includes('gaming') || types.includes('vlogs'))) { extra++; why.push('fast-paced'); }
+    if (extra && !hard) {
+      p.load = Math.min(2, p.load + (extra >= 2 ? 2 : 1));
+      p.reasons.unshift('tiring for you: ' + why.join(', '));
+    }
+    if (p.load > 0 || types.length) p.known = true;
+    return p;
+  }
+
+  /** The profile that applies to a mood: your answers → the mood's own → defaults. */
+  function moodProfileFor(profile, moodKey, mood) {
+    if (profile && profile.moodProfiles && profile.moodProfiles[moodKey]) return profile.moodProfiles[moodKey];
+    if (mood && mood.profile) return mood.profile;
+    return DEFAULT_MOOD_PROFILES[moodKey] || null;
+  }
+
+  root.MindfulProfile = {
+    DEFAULT_MOOD_PROFILES, DEFAULT_CALIBRATION, STRAIN, LOW_MOODS, GENERAL_QUESTIONS, MOOD_QUESTIONS,
+    build, personalize, moodProfileFor,
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulProfile;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+;
 // ---- core/curator.js ----
 /*
  * Mindful Feed – in-page runtime for m.youtube.com / www.youtube.com.
@@ -1293,7 +1617,8 @@
   const X = window.MindfulExtractor;
   const P = window.MindfulPolicy;
   const Lr = window.MindfulLearner;
-  if (!C || !X || !P || !Lr) { console.warn('[MindfulFeed] core modules missing'); return; }
+  const Pr = window.MindfulProfile;
+  if (!C || !X || !P || !Lr || !Pr) { console.warn('[MindfulFeed] core modules missing'); return; }
 
   // ---------------------------------------------------------------------------
   // Storage (localStorage on the YouTube origin; survives app restarts)
@@ -1318,6 +1643,16 @@
   let learner = Lr.load(store.get('learner', null));
   function saveLearner() { store.set('learner', learner); }
   if (learner.v < 2) { Lr.migrateToMoods(learner, P.PRESETS); saveLearner(); }
+
+  // What each mood means to you (setup questionnaire).
+  let profile = store.get('profile', null);
+  function saveProfile() { store.set('profile', profile); }
+  function currentMoodProfile() { return Pr.moodProfileFor(profile, modeKey(), currentPreset && allMoods()[currentPreset]); }
+
+  // YouTube's own details (category, tags, description) for videos we're unsure about.
+  let enrich = store.get('enrich', {});
+  const enrichQueue = [], pending = new Set();
+  let enrichBusy = false, enrichFails = 0, enrichThisPage = 0, enrichStatus = 'idle', pendingStyle = null;
 
   // Moods = built-in presets + moods you created yourself.
   let customMoods = store.get('moods', []);
@@ -1411,12 +1746,20 @@
   // ---------------------------------------------------------------------------
   // Classification + decisions
   // ---------------------------------------------------------------------------
+  function withDetails(meta) {
+    const e = meta.id && enrich[meta.id];
+    if (!e) return meta;
+    return Object.assign({}, meta, { category: e.c || null, tags: e.t || [], description: ((meta.description || '') + ' · ' + (e.d || '')).slice(0, 800) });
+  }
+
   function profileFor(meta) {
     const key = meta.id || meta.title;
     let prof = profiles.get(key);
     if (!prof) {
-      prof = C.classify(meta);
+      const m = withDetails(meta);
+      prof = C.classify(m);
       if (meta.id && aiCache[meta.id]) prof = C.mergeAi(prof, aiCache[meta.id]);
+      prof = Pr.personalize(prof, m, profile && profile.calibration, C.titleComplexity);
       profiles.set(key, prof);
       if (S.aiEnabled && meta.id && !aiCache[meta.id] && meta.kind === 'video' && !meta.isShort) aiEnqueue(meta);
     }
@@ -1427,7 +1770,7 @@
   function decisionFor(meta, context) {
     const learned = Lr.judge(learner, meta, modeKey());
     const prof = Lr.adjustProfile(profileFor(meta), learned);
-    return { prof, d: P.decide(meta, prof, S, { context, infoUsed: infoUsed(), learned }) };
+    return { prof, d: P.decide(meta, prof, S, { context, infoUsed: infoUsed(), learned, moodProfile: currentMoodProfile() }) };
   }
 
   function evaluate(meta, context) {
@@ -1522,7 +1865,13 @@
       if (!context) context = kind === 'search' ? 'search' : pageContext();
       if (context === 'watch') context = 'related';
       X.prune(json, {
-        decide: m => (m.id ? toVerdict(evaluate(m, context)) : { remove: false }),
+        decide: m => {
+          if (!m.id) return { remove: false };
+          const d = evaluate(m, context);
+          // Unsure? Keep it in the page (hidden) and ask YouTube for its category first.
+          if (d.unclear && wantDetails(m)) { queueDetails(m); return { remove: false }; }
+          return toVerdict(d);
+        },
         hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn(context),
       });
     } catch (e) {
@@ -1530,6 +1879,79 @@
     }
     return json;
   }
+  // ---- details lookup (category / tags) for unclear videos ------------------
+  function wantDetails(m) {
+    return S.enrich && S.enabled && m.kind === 'video' && !m.isShort && !enrich[m.id] && enrichFails < 3 && enrichThisPage < 40;
+  }
+  function queueDetails(m) {
+    if (pending.has(m.id)) return;
+    pending.add(m.id); enrichQueue.push(m); enrichThisPage++;
+    updatePendingCss();
+    setTimeout(pumpDetails, 50);
+  }
+  function updatePendingCss() {
+    if (!document.documentElement) return;
+    if (!pendingStyle) { pendingStyle = document.createElement('style'); pendingStyle.id = 'mindful-feed-pending'; }
+    const ids = Array.from(pending).slice(-150).filter(id => /^[\w-]{11}$/.test(id));
+    pendingStyle.textContent = ids.length ? ids.map(id => ':is(ytm-rich-item-renderer,ytm-video-with-context-renderer,ytm-media-item,ytd-rich-item-renderer):has(a[href*="' + id + '"])').join(',') + '{display:none!important}' : '';
+    if (!pendingStyle.isConnected) (document.head || document.documentElement).appendChild(pendingStyle);
+  }
+  function ytcfgGet(k) {
+    const c = window.ytcfg;
+    if (!c) return undefined;
+    if (typeof c.get === 'function') return c.get(k);
+    return c.data_ ? c.data_[k] : undefined;
+  }
+  async function fetchDetails(id) {
+    const context = ytcfgGet('INNERTUBE_CONTEXT');
+    if (!context) throw new Error('YouTube page config not found');
+    const key = ytcfgGet('INNERTUBE_API_KEY');
+    const headers = { 'content-type': 'application/json' };
+    const cn = ytcfgGet('INNERTUBE_CONTEXT_CLIENT_NAME'), cv = ytcfgGet('INNERTUBE_CLIENT_VERSION');
+    if (cn) headers['X-Youtube-Client-Name'] = String(cn);
+    if (cv) headers['X-Youtube-Client-Version'] = String(cv);
+    const r = await origFetch.call(window, '/youtubei/v1/player?prettyPrint=false' + (key ? '&key=' + encodeURIComponent(key) : ''), {
+      method: 'POST', credentials: 'same-origin', headers,
+      body: JSON.stringify({ context, videoId: id, contentCheckOk: true, racyCheckOk: true }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const vd = j.videoDetails || {};
+    const mf = (j.microformat && j.microformat.playerMicroformatRenderer) || {};
+    return {
+      c: mf.category || null,
+      t: (vd.keywords || []).slice(0, 20),
+      d: String(vd.shortDescription || X.text(mf.description) || '').slice(0, 400),
+      at: Date.now(),
+    };
+  }
+  async function pumpDetails() {
+    if (enrichBusy || !enrichQueue.length) return;
+    enrichBusy = true;
+    const m = enrichQueue.shift();
+    try {
+      enrich[m.id] = await fetchDetails(m.id);
+      enrichFails = 0; enrichStatus = 'ok – ' + Object.keys(enrich).length + ' videos looked up';
+      const keys = Object.keys(enrich);
+      if (keys.length > 3000) for (const k of keys.slice(0, keys.length - 2500)) delete enrich[k];
+      store.set('enrich', enrich);
+    } catch (e) {
+      enrichFails++; enrichStatus = 'paused: ' + e.message;
+    }
+    pending.delete(m.id);
+    profiles.delete(m.id);
+    const v = verdicts.get(m.id);
+    if (v) evaluate(v.meta, v.context);
+    updatePendingCss(); queueScan();
+    enrichBusy = false;
+    if (enrichFails >= 3) { // YouTube didn't cooperate – stop asking, show what we have.
+      for (const x of enrichQueue.splice(0)) pending.delete(x.id);
+      updatePendingCss(); queueScan();
+      return;
+    }
+    if (enrichQueue.length) setTimeout(pumpDetails, 600);
+  }
+
   /** Posts stay only where you asked for them: the "Posts" chip, or a channel's own page. */
   function hidePostsIn(context) { return !!S.hidePosts && !postsChip && context !== 'channel'; }
 
@@ -1760,7 +2182,8 @@
     const v = verdicts.get(id); if (!v) return;
     const p = v.prof;
     const icons = (p.needs || []).map(n => NEED_ICON[n]).filter(Boolean).slice(0, 3).join('');
-    const label = (icons ? icons + ' ' : '') + LOAD_LABEL[p.load] + (p.tone === 'light' ? ' · light' : '') + (p.source === 'ai' ? ' · ✦' : '');
+    const typeIcons = icons ? '' : (p.types || []).map(t => (C.TYPE_DEFS[t] || {}).emoji).filter(Boolean).slice(0, 2).join('');
+    const label = (icons ? icons + ' ' : typeIcons ? typeIcons + ' ' : '') + LOAD_LABEL[p.load] + (p.tone === 'light' ? ' · light' : '') + (p.source === 'ai' ? ' · ✦' : '');
     const b = document.createElement('div');
     b.className = 'mf-badge'; b.textContent = label + '  ·  👍👎';
     b.title = (p.reasons || []).join('\n') + '\nTap to tell Mindful Feed whether this fits.';
@@ -1785,7 +2208,7 @@
     if (location.pathname !== lastPath) {
       // A different page starts with the "All" chip and a fresh count.
       lastPath = location.pathname;
-      postsChip = false; pageShown.clear(); pageHeld.clear(); autoFillRounds = 0; updateStat();
+      postsChip = false; pageShown.clear(); pageHeld.clear(); autoFillRounds = 0; enrichThisPage = 0; updateStat();
     }
     updatePostsClass();
     updateWatchChip();
@@ -1845,7 +2268,7 @@
     aiInFlight++; aiStatus = 'classifying ' + batch.length + '…';
     try {
       native.postMessage(JSON.stringify({
-        type: 'classify', requestId: reqId, model: S.aiModel, needs: C.NEEDS, topics: C.TOPICS,
+        type: 'classify', requestId: reqId, model: S.aiModel, needs: C.NEEDS, topics: C.TOPICS, types: C.TYPES,
         feedback: Lr.examplesForAi(learner, 40),
         items: batch.map(m => ({ id: m.id, title: m.title, channel: m.channel || '', duration: m.durationText || '', snippet: (m.description || '').slice(0, 200) })),
       }));
@@ -2055,7 +2478,9 @@
   }
 
   function applyPreset(k) {
-    Object.assign(S, { includeNoMood: false }, allMoods()[k].set);
+    const base = { includeNoMood: false };
+    if (profile && profile.answers && profile.answers.companyFeel) base.blockParasocial = true;
+    Object.assign(S, base, allMoods()[k].set, (profile && profile.overrides && profile.overrides[k]) || {});
     currentPreset = k; store.set('preset', k);
     lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn);
     saveSettings();
@@ -2080,6 +2505,10 @@
     sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: 'How are you right now?' }),
       h('button', { class: 'x', 'aria-label': 'Close', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); closePanel(); } }, '×')));
     sheet.appendChild(h('p', { class: 'note', text: 'Your feed will only show what fits. Nothing informational gets lost – it waits on your Later shelf.' }));
+    if (!profile) sheet.appendChild(h('div', { class: 'card', style: 'flex-direction:column;align-items:stretch' },
+      h('div', { class: 't', text: 'New here? Tell Mindful Feed what each mood means to you.' }),
+      h('div', { class: 'm', text: 'About 5 minutes (most answers are pre-filled) – it makes the filter much more accurate. You can also just pick a mood below.' }),
+      h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); checkInOpen = false; openQuiz(null); } }, 'Start setup'))));
     sheet.appendChild(presetGrid(k => {
       applyPreset(k);
       if (allMoods()[k].ask) { checkInAsk = k; renderPanel(); return; }
@@ -2117,7 +2546,15 @@
     const cur = currentPreset && allMoods()[currentPreset];
     b.appendChild(h('p', { class: 'big' }, cur ? cur.emoji + ' ' + cur.label : 'Custom mix'));
     b.appendChild(presetGrid(k => { applyPreset(k); renderPanel(); markDirty(); }));
+    const mp = currentMoodProfile();
+    if (cur) {
+      const tl = ts => (ts || []).map(t => (C.TYPE_DEFS[t] || {}).emoji + ' ' + ((C.TYPE_DEFS[t] || {}).label || t)).join(', ');
+      b.appendChild(h('p', { class: 'note', text: mp
+        ? 'Shows: ' + (tl(mp.like) || 'whatever fits') + (mp.avoid && mp.avoid.length ? ' · Keeps away: ' + tl(mp.avoid) : '') + (mp.maxMinutes ? ' · up to ' + mp.maxMinutes + ' min' : '')
+        : 'Shows whatever fits the settings below.' }));
+    }
     b.appendChild(h('div', { class: 'btns' },
+      cur ? h('button', { class: 'btn', onclick: () => openQuiz(currentPreset) }, '✎ Adjust what this mood shows') : null,
       h('button', { class: 'btn', onclick: () => openEditor(null, 'now') }, '＋ New mood'),
       cur && cur.custom ? h('button', { class: 'btn', onclick: () => openEditor(cur, 'now') }, '✎ Edit this mood') : null));
     if (cur && cur.ask) {
@@ -2136,7 +2573,9 @@
       } }, l)))));
     b.appendChild(row('Tone', null, seg([['light', 'Light-hearted'], ['balanced', 'Balanced'], ['any', 'Anything']], S.tone, v => setAndRefresh('tone', v))));
     b.appendChild(row('Politics', null, seg([['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']], S.politics, v => setAndRefresh('politics', v))));
-    b.appendChild(row('News', null, seg([['hide', 'No news'], ['show', 'News ok']], S.news, v => setAndRefresh('news', v))));
+    b.appendChild(row('News', null, seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.news, v => setAndRefresh('news', v))));
+    b.appendChild(row('Music', null, seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.music, v => setAndRefresh('music', v))));
+    b.appendChild(row('Emotional', 'Emotionally heavy, or dwelling in a feeling', seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.emotional, v => setAndRefresh('emotional', v))));
     b.appendChild(row('Distressing topics', 'Crime, war, disasters, horror', seg([['hide', 'Hide'], ['show', 'Allow']], S.distressing, v => setAndRefresh('distressing', v))));
     b.appendChild(row('Also show "fits no mood" videos', 'Videos you sorted into the "fits no mood" pile (' + Lr.noMoodVideos(learner).length + ')', check('includeNoMood', markDirty)));
     b.appendChild(row('Only clear matches', 'Hide videos that don\'t clearly fit the mode (also ones we can\'t classify)', check('strictNeed', markDirty)));
@@ -2214,6 +2653,7 @@
     b.appendChild(row('Block parasocial videos', 'Vlogs, drama, reactions, “we need to talk”, streams', check('blockParasocial', markDirty)));
     b.appendChild(row('Block addictive patterns', 'Clickbait, rage bait, challenges, pranks', check('blockAddictive', markDirty)));
     b.appendChild(row('Hide Shorts', 'Feed shelves and the Shorts tab', check('hideShorts', markDirty)));
+    b.appendChild(row('Look up details for unclear videos', 'Asks YouTube for a video\'s category and tags (one small request each, only when unsure, remembered). Status: ' + enrichStatus, check('enrich', markDirty)));
     b.appendChild(row('Keep loading while the feed is nearly empty', 'Fetches more recommendations from YouTube in the background', check('autoFill')));
     b.appendChild(row('Hide community posts', 'Except when you pick the "Posts" chip above the feed, or on a channel\'s page', check('hidePosts', () => { updatePostsClass(); markDirty(); })));
     b.appendChild(row('Hide ad cards in feeds', 'Player ads are not touched', check('hideAds', markDirty)));
@@ -2428,13 +2868,16 @@
 
   function renderTeach(b) {
     const t = teach || (teach = { view: 'home' });
-    ({ home: teachHome, quick: teachQuick, sort: teachSort, editor: teachEditor })[t.view](b, t);
+    ({ home: teachHome, quick: teachQuick, sort: teachSort, editor: teachEditor, quiz: teachQuiz })[t.view](b, t);
   }
 
-  function teachHome(b) {
+  function teachHome(b, t) {
+    if (t && t.saved) b.appendChild(h('p', { class: 'note', text: '✓ Saved. Your moods now follow your answers – close this panel to refresh the feed.' }));
     b.appendChild(h('p', { class: 'big', text: 'Teach Mindful Feed what fits you' }));
     b.appendChild(h('p', { class: 'note', text: 'Everything is learned on this device – no API key needed. Similar videos (shared words or the same channel) follow your answers. With an API key, your answers also guide Claude.' }));
     b.appendChild(h('div', { class: 'choice' },
+      h('button', { class: 'preset', onclick: () => openQuiz(null) },
+        (profile ? '🧭 Redo the setup questions' : '🧭 Setup questions – what each mood means to you'), h('small', { text: 'About 5 minutes – most answers are pre-filled, just adjust. What feels easy or demanding to you, what helps in each mood, what to keep away.' })),
       h('button', { class: 'preset', onclick: () => { teach = { view: 'quick', asked: new Set(), queue: [], i: 0, step: 'ask', reasons: new Set(), answered: 0 }; teach.queue = buildQuickQueue(teach.asked, 10); renderPanel(); } },
         '✅ Quick check – ' + modeLabel(), h('small', { text: 'Yes / no for your current mood, 10 videos at a time.' })),
       h('button', { class: 'preset', onclick: () => { teach = { view: 'sort', skipped: new Set(), selected: new Set(), step: 'pick', sorted: 0, blockChannel: false }; renderPanel(); } },
@@ -2538,6 +2981,113 @@
     b.appendChild(loadMoreButton());
   }
 
+  // ---- setup questionnaire --------------------------------------------------
+  const COMMON_MOODS = ['drained', 'anxious', 'unwind', 'laugh', 'curious', 'focused', 'sleep'];
+
+  /** @param onlyMood set up just this mood (from "Adjust what this mood shows") */
+  function openQuiz(onlyMood) {
+    const prev = (profile && profile.answers) || {};
+    const answers = JSON.parse(JSON.stringify(prev));
+    answers.perMood = answers.perMood || {};
+    if (!answers.moods) answers.moods = COMMON_MOODS.filter(k => allMoods()[k]);
+    if (onlyMood && !answers.moods.includes(onlyMood)) answers.moods.push(onlyMood);
+    for (const k of answers.moods) prefillMood(answers, k);
+    teach = { view: 'quiz', answers, i: 0, onlyMood: onlyMood || null };
+    activeTab = 'teach'; panelOpen = true; fb = null; checkInOpen = false;
+    renderPanel();
+  }
+  function prefillMood(answers, k) {
+    if (answers.perMood[k]) return;
+    const d = Pr.moodProfileFor(null, k, allMoods()[k]) || { like: [], avoid: [] };
+    answers.perMood[k] = { like: (d.like || []).slice(), avoid: (d.avoid || []).slice(), maxMinutes: d.maxMinutes || 0, likeWords: '', avoidWords: '' };
+  }
+  function quizSteps(t) {
+    const steps = [];
+    if (!t.onlyMood) for (const q of Pr.GENERAL_QUESTIONS) steps.push({ q, mood: null });
+    const moods = t.onlyMood ? [t.onlyMood] : t.answers.moods.filter(k => allMoods()[k]);
+    for (const k of moods) for (const q of Pr.MOOD_QUESTIONS) steps.push({ q, mood: k });
+    steps.push({ q: { id: 'summary', type: 'summary' }, mood: null });
+    return steps;
+  }
+
+  function teachQuiz(b, t) {
+    const steps = quizSteps(t);
+    t.i = Math.max(0, Math.min(t.i, steps.length - 1));
+    const step = steps[t.i], q = step.q, A = t.answers;
+    const moodName = step.mood ? (allMoods()[step.mood].emoji + ' ' + allMoods()[step.mood].label.toLowerCase()) : '';
+    const target = step.mood ? (A.perMood[step.mood] = A.perMood[step.mood] || {}) : A;
+    const go = d => { t.i += d; renderPanel(); };
+    const nav = (nextLabel) => h('div', { class: 'btns' },
+      t.i > 0 ? h('button', { class: 'btn', onclick: () => go(-1) }, '‹ Back') : h('button', { class: 'btn', onclick: () => { teach = { view: 'home' }; renderPanel(); } }, 'Cancel'),
+      h('button', { class: 'btn p', onclick: () => go(1) }, nextLabel || 'Next ›'));
+
+    b.appendChild(h('p', { class: 'progress', text: q.type === 'summary' ? 'Almost done' : 'Question ' + (t.i + 1) + ' of ' + (steps.length - 1) + (step.mood ? ' · ' + moodName : '') }));
+    if (q.type === 'summary') return quizSummary(b, t);
+    b.appendChild(h('p', { class: 'big', text: q.q.replace('{mood}', moodName) }));
+    if (q.help) b.appendChild(h('p', { class: 'note', text: q.help }));
+
+    if (q.type === 'multi') {
+      let opts;
+      if (q.options === 'types') {
+        const exclude = q.id === 'avoid' ? (target.like || []) : q.id === 'hard' ? (A.easy || []) : [];
+        opts = C.TYPES.filter(k => !exclude.includes(k)).map(k => [k, C.TYPE_DEFS[k].emoji + ' ' + C.TYPE_DEFS[k].label]);
+      } else if (q.options === 'strain') opts = Object.keys(Pr.STRAIN).map(k => [k, Pr.STRAIN[k]]);
+      else opts = moodList().map(x => [x.key, x.label]);
+      const cur = new Set(target[q.id] || []);
+      b.appendChild(h('div', { class: 'chips' }, opts.map(([k, l]) => h('button', { class: 'tchip' + (cur.has(k) ? ' on' : ''), onclick: () => {
+        cur.has(k) ? cur.delete(k) : cur.add(k); target[q.id] = Array.from(cur);
+        if (q.id === 'moods') for (const m of target.moods) prefillMood(A, m);
+        renderPanel();
+      } }, l))));
+      b.appendChild(nav());
+    } else if (q.type === 'single') {
+      b.appendChild(h('div', { class: 'choice' }, q.options.map(([v, l]) => h('button', { class: 'preset' + (String(target[q.id]) === String(v) ? ' on' : ''), onclick: () => { target[q.id] = v; go(1); } }, l))));
+      b.appendChild(nav('Skip ›'));
+    } else if (q.type === 'words') {
+      const mk = (key, ph) => { const i = h('input', { type: 'text', placeholder: ph, style: 'width:100%;margin:4px 0' }); i.value = target[key] || ''; i.addEventListener('input', () => { target[key] = i.value; }); return i; };
+      b.appendChild(h('p', { class: 'note', text: 'Perfect for this mood:' }));
+      b.appendChild(mk('likeWords', 'e.g. lofi, Bob Ross, Stardew Valley'));
+      b.appendChild(h('p', { class: 'note', text: 'Keep away:' }));
+      b.appendChild(mk('avoidWords', 'e.g. true crime, reaction, election'));
+      b.appendChild(nav());
+    }
+  }
+
+  function quizSummary(b, t) {
+    const A = t.answers;
+    const built = Pr.build(A);
+    const tl = ts => (ts || []).map(k => (C.TYPE_DEFS[k] || {}).emoji || k).join(' ') || '–';
+    b.appendChild(h('p', { class: 'big', text: 'Here\'s what Mindful Feed will do' }));
+    if (!t.onlyMood) {
+      const cal = built.calibration;
+      b.appendChild(h('p', { class: 'note', text: 'Easy for you: ' + tl(cal.easy) + ' · Demanding for you: ' + tl(cal.hard) +
+        (cal.strain.length ? ' · Tiring: ' + cal.strain.map(k => Pr.STRAIN[k].toLowerCase()).join(', ') : '') +
+        (cal.lengthMin ? ' · Feels long after ' + cal.lengthMin + ' min' : '') }));
+    }
+    for (const k of Object.keys(built.moodProfiles)) {
+      if (t.onlyMood && k !== t.onlyMood) continue;
+      if (!allMoods()[k]) continue;
+      const mp = built.moodProfiles[k], o = built.overrides[k] || {};
+      b.appendChild(h('div', { class: 'log' },
+        h('div', { text: allMoods()[k].emoji + ' ' + allMoods()[k].label }),
+        h('div', { class: 'r', text: 'Shows ' + tl(mp.like) + ' · keeps away ' + tl(mp.avoid) + (mp.maxMinutes ? ' · up to ' + mp.maxMinutes + ' min' : '') +
+          (o.emotional ? ' · emotional: ' + (o.emotional === 'show' ? 'allowed' : 'hidden') : '') +
+          (mp.likeWords.length ? ' · + ' + mp.likeWords.join(', ') : '') + (mp.avoidWords.length ? ' · − ' + mp.avoidWords.join(', ') : '') })));
+    }
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn', onclick: () => { t.i--; renderPanel(); } }, '‹ Back'),
+      h('button', { class: 'btn p', onclick: () => {
+        const merged = t.onlyMood && profile ? Pr.build(Object.assign({}, profile.answers, { perMood: Object.assign({}, profile.answers.perMood, { [t.onlyMood]: A.perMood[t.onlyMood] }), moods: Array.from(new Set((profile.answers.moods || []).concat([t.onlyMood]))) })) : built;
+        profile = merged; saveProfile();
+        profiles.clear();
+        if (currentPreset && allMoods()[currentPreset]) applyPreset(currentPreset);
+        markDirty();
+        teach = { view: 'home', saved: true };
+        if (t.onlyMood) activeTab = 'now';
+        renderPanel();
+      } }, 'Save & apply')));
+  }
+
   // ---- mood editor ----------------------------------------------------------
   const EMOJIS = ['🎵', '🎮', '🍳', '🌍', '🐾', '🎨', '📖', '🏃', '🧘', '✨', '🌊', '🔧', '🚀', '☕'];
 
@@ -2580,6 +3130,20 @@
     b.appendChild(row('Politics', null, segSet('politics', [['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']])));
     b.appendChild(row('News', null, segSet('news', [['hide', 'No'], ['show', 'Yes']])));
     b.appendChild(row('Distressing topics', null, segSet('distressing', [['hide', 'Hide'], ['show', 'Allow']])));
+    if (!st.music) st.music = 'show';
+    if (!st.emotional) st.emotional = 'show';
+    b.appendChild(row('Music', null, segSet('music', [['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']])));
+    b.appendChild(row('Emotional', null, segSet('emotional', [['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']])));
+    const prof = d.profile = d.profile || { like: [], avoid: [], maxMinutes: null, likeWords: [], avoidWords: [] };
+    const typeChips = (key, other) => h('div', { class: 'chips' }, C.TYPES.filter(k => !(prof[other] || []).includes(k)).map(k =>
+      h('button', { class: 'tchip' + ((prof[key] || []).includes(k) ? ' on' : ''), onclick: () => {
+        const set = new Set(prof[key] || []); set.has(k) ? set.delete(k) : set.add(k); prof[key] = Array.from(set); renderPanel();
+      } }, C.TYPE_DEFS[k].emoji + ' ' + C.TYPE_DEFS[k].label)));
+    b.appendChild(h('h3', { text: 'What fits this mood' }));
+    b.appendChild(typeChips('like', 'avoid'));
+    b.appendChild(h('h3', { text: 'Keep away' }));
+    b.appendChild(typeChips('avoid', 'like'));
+    b.appendChild(row('Longest videos', null, seg([[0, 'Any'], [10, '10 min'], [20, '20 min'], [45, '45 min']], prof.maxMinutes || 0, v => { prof.maxMinutes = v || null; renderPanel(); })));
     const inc = h('input', { type: 'checkbox' }); inc.checked = !!st.includeNoMood;
     inc.addEventListener('change', () => { st.includeNoMood = inc.checked; });
     b.appendChild(row('Also show the whole "fits no mood" pile', null, inc));

@@ -25,7 +25,8 @@
   const X = window.MindfulExtractor;
   const P = window.MindfulPolicy;
   const Lr = window.MindfulLearner;
-  if (!C || !X || !P || !Lr) { console.warn('[MindfulFeed] core modules missing'); return; }
+  const Pr = window.MindfulProfile;
+  if (!C || !X || !P || !Lr || !Pr) { console.warn('[MindfulFeed] core modules missing'); return; }
 
   // ---------------------------------------------------------------------------
   // Storage (localStorage on the YouTube origin; survives app restarts)
@@ -50,6 +51,16 @@
   let learner = Lr.load(store.get('learner', null));
   function saveLearner() { store.set('learner', learner); }
   if (learner.v < 2) { Lr.migrateToMoods(learner, P.PRESETS); saveLearner(); }
+
+  // What each mood means to you (setup questionnaire).
+  let profile = store.get('profile', null);
+  function saveProfile() { store.set('profile', profile); }
+  function currentMoodProfile() { return Pr.moodProfileFor(profile, modeKey(), currentPreset && allMoods()[currentPreset]); }
+
+  // YouTube's own details (category, tags, description) for videos we're unsure about.
+  let enrich = store.get('enrich', {});
+  const enrichQueue = [], pending = new Set();
+  let enrichBusy = false, enrichFails = 0, enrichThisPage = 0, enrichStatus = 'idle', pendingStyle = null;
 
   // Moods = built-in presets + moods you created yourself.
   let customMoods = store.get('moods', []);
@@ -143,12 +154,20 @@
   // ---------------------------------------------------------------------------
   // Classification + decisions
   // ---------------------------------------------------------------------------
+  function withDetails(meta) {
+    const e = meta.id && enrich[meta.id];
+    if (!e) return meta;
+    return Object.assign({}, meta, { category: e.c || null, tags: e.t || [], description: ((meta.description || '') + ' · ' + (e.d || '')).slice(0, 800) });
+  }
+
   function profileFor(meta) {
     const key = meta.id || meta.title;
     let prof = profiles.get(key);
     if (!prof) {
-      prof = C.classify(meta);
+      const m = withDetails(meta);
+      prof = C.classify(m);
       if (meta.id && aiCache[meta.id]) prof = C.mergeAi(prof, aiCache[meta.id]);
+      prof = Pr.personalize(prof, m, profile && profile.calibration, C.titleComplexity);
       profiles.set(key, prof);
       if (S.aiEnabled && meta.id && !aiCache[meta.id] && meta.kind === 'video' && !meta.isShort) aiEnqueue(meta);
     }
@@ -159,7 +178,7 @@
   function decisionFor(meta, context) {
     const learned = Lr.judge(learner, meta, modeKey());
     const prof = Lr.adjustProfile(profileFor(meta), learned);
-    return { prof, d: P.decide(meta, prof, S, { context, infoUsed: infoUsed(), learned }) };
+    return { prof, d: P.decide(meta, prof, S, { context, infoUsed: infoUsed(), learned, moodProfile: currentMoodProfile() }) };
   }
 
   function evaluate(meta, context) {
@@ -254,7 +273,13 @@
       if (!context) context = kind === 'search' ? 'search' : pageContext();
       if (context === 'watch') context = 'related';
       X.prune(json, {
-        decide: m => (m.id ? toVerdict(evaluate(m, context)) : { remove: false }),
+        decide: m => {
+          if (!m.id) return { remove: false };
+          const d = evaluate(m, context);
+          // Unsure? Keep it in the page (hidden) and ask YouTube for its category first.
+          if (d.unclear && wantDetails(m)) { queueDetails(m); return { remove: false }; }
+          return toVerdict(d);
+        },
         hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn(context),
       });
     } catch (e) {
@@ -262,6 +287,79 @@
     }
     return json;
   }
+  // ---- details lookup (category / tags) for unclear videos ------------------
+  function wantDetails(m) {
+    return S.enrich && S.enabled && m.kind === 'video' && !m.isShort && !enrich[m.id] && enrichFails < 3 && enrichThisPage < 40;
+  }
+  function queueDetails(m) {
+    if (pending.has(m.id)) return;
+    pending.add(m.id); enrichQueue.push(m); enrichThisPage++;
+    updatePendingCss();
+    setTimeout(pumpDetails, 50);
+  }
+  function updatePendingCss() {
+    if (!document.documentElement) return;
+    if (!pendingStyle) { pendingStyle = document.createElement('style'); pendingStyle.id = 'mindful-feed-pending'; }
+    const ids = Array.from(pending).slice(-150).filter(id => /^[\w-]{11}$/.test(id));
+    pendingStyle.textContent = ids.length ? ids.map(id => ':is(ytm-rich-item-renderer,ytm-video-with-context-renderer,ytm-media-item,ytd-rich-item-renderer):has(a[href*="' + id + '"])').join(',') + '{display:none!important}' : '';
+    if (!pendingStyle.isConnected) (document.head || document.documentElement).appendChild(pendingStyle);
+  }
+  function ytcfgGet(k) {
+    const c = window.ytcfg;
+    if (!c) return undefined;
+    if (typeof c.get === 'function') return c.get(k);
+    return c.data_ ? c.data_[k] : undefined;
+  }
+  async function fetchDetails(id) {
+    const context = ytcfgGet('INNERTUBE_CONTEXT');
+    if (!context) throw new Error('YouTube page config not found');
+    const key = ytcfgGet('INNERTUBE_API_KEY');
+    const headers = { 'content-type': 'application/json' };
+    const cn = ytcfgGet('INNERTUBE_CONTEXT_CLIENT_NAME'), cv = ytcfgGet('INNERTUBE_CLIENT_VERSION');
+    if (cn) headers['X-Youtube-Client-Name'] = String(cn);
+    if (cv) headers['X-Youtube-Client-Version'] = String(cv);
+    const r = await origFetch.call(window, '/youtubei/v1/player?prettyPrint=false' + (key ? '&key=' + encodeURIComponent(key) : ''), {
+      method: 'POST', credentials: 'same-origin', headers,
+      body: JSON.stringify({ context, videoId: id, contentCheckOk: true, racyCheckOk: true }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const vd = j.videoDetails || {};
+    const mf = (j.microformat && j.microformat.playerMicroformatRenderer) || {};
+    return {
+      c: mf.category || null,
+      t: (vd.keywords || []).slice(0, 20),
+      d: String(vd.shortDescription || X.text(mf.description) || '').slice(0, 400),
+      at: Date.now(),
+    };
+  }
+  async function pumpDetails() {
+    if (enrichBusy || !enrichQueue.length) return;
+    enrichBusy = true;
+    const m = enrichQueue.shift();
+    try {
+      enrich[m.id] = await fetchDetails(m.id);
+      enrichFails = 0; enrichStatus = 'ok – ' + Object.keys(enrich).length + ' videos looked up';
+      const keys = Object.keys(enrich);
+      if (keys.length > 3000) for (const k of keys.slice(0, keys.length - 2500)) delete enrich[k];
+      store.set('enrich', enrich);
+    } catch (e) {
+      enrichFails++; enrichStatus = 'paused: ' + e.message;
+    }
+    pending.delete(m.id);
+    profiles.delete(m.id);
+    const v = verdicts.get(m.id);
+    if (v) evaluate(v.meta, v.context);
+    updatePendingCss(); queueScan();
+    enrichBusy = false;
+    if (enrichFails >= 3) { // YouTube didn't cooperate – stop asking, show what we have.
+      for (const x of enrichQueue.splice(0)) pending.delete(x.id);
+      updatePendingCss(); queueScan();
+      return;
+    }
+    if (enrichQueue.length) setTimeout(pumpDetails, 600);
+  }
+
   /** Posts stay only where you asked for them: the "Posts" chip, or a channel's own page. */
   function hidePostsIn(context) { return !!S.hidePosts && !postsChip && context !== 'channel'; }
 
@@ -492,7 +590,8 @@
     const v = verdicts.get(id); if (!v) return;
     const p = v.prof;
     const icons = (p.needs || []).map(n => NEED_ICON[n]).filter(Boolean).slice(0, 3).join('');
-    const label = (icons ? icons + ' ' : '') + LOAD_LABEL[p.load] + (p.tone === 'light' ? ' · light' : '') + (p.source === 'ai' ? ' · ✦' : '');
+    const typeIcons = icons ? '' : (p.types || []).map(t => (C.TYPE_DEFS[t] || {}).emoji).filter(Boolean).slice(0, 2).join('');
+    const label = (icons ? icons + ' ' : typeIcons ? typeIcons + ' ' : '') + LOAD_LABEL[p.load] + (p.tone === 'light' ? ' · light' : '') + (p.source === 'ai' ? ' · ✦' : '');
     const b = document.createElement('div');
     b.className = 'mf-badge'; b.textContent = label + '  ·  👍👎';
     b.title = (p.reasons || []).join('\n') + '\nTap to tell Mindful Feed whether this fits.';
@@ -517,7 +616,7 @@
     if (location.pathname !== lastPath) {
       // A different page starts with the "All" chip and a fresh count.
       lastPath = location.pathname;
-      postsChip = false; pageShown.clear(); pageHeld.clear(); autoFillRounds = 0; updateStat();
+      postsChip = false; pageShown.clear(); pageHeld.clear(); autoFillRounds = 0; enrichThisPage = 0; updateStat();
     }
     updatePostsClass();
     updateWatchChip();
@@ -577,7 +676,7 @@
     aiInFlight++; aiStatus = 'classifying ' + batch.length + '…';
     try {
       native.postMessage(JSON.stringify({
-        type: 'classify', requestId: reqId, model: S.aiModel, needs: C.NEEDS, topics: C.TOPICS,
+        type: 'classify', requestId: reqId, model: S.aiModel, needs: C.NEEDS, topics: C.TOPICS, types: C.TYPES,
         feedback: Lr.examplesForAi(learner, 40),
         items: batch.map(m => ({ id: m.id, title: m.title, channel: m.channel || '', duration: m.durationText || '', snippet: (m.description || '').slice(0, 200) })),
       }));
@@ -787,7 +886,9 @@
   }
 
   function applyPreset(k) {
-    Object.assign(S, { includeNoMood: false }, allMoods()[k].set);
+    const base = { includeNoMood: false };
+    if (profile && profile.answers && profile.answers.companyFeel) base.blockParasocial = true;
+    Object.assign(S, base, allMoods()[k].set, (profile && profile.overrides && profile.overrides[k]) || {});
     currentPreset = k; store.set('preset', k);
     lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn);
     saveSettings();
@@ -812,6 +913,10 @@
     sheet.appendChild(h('div', { class: 'top' }, h('h2', { text: 'How are you right now?' }),
       h('button', { class: 'x', 'aria-label': 'Close', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); closePanel(); } }, '×')));
     sheet.appendChild(h('p', { class: 'note', text: 'Your feed will only show what fits. Nothing informational gets lost – it waits on your Later shelf.' }));
+    if (!profile) sheet.appendChild(h('div', { class: 'card', style: 'flex-direction:column;align-items:stretch' },
+      h('div', { class: 't', text: 'New here? Tell Mindful Feed what each mood means to you.' }),
+      h('div', { class: 'm', text: 'About 5 minutes (most answers are pre-filled) – it makes the filter much more accurate. You can also just pick a mood below.' }),
+      h('div', { class: 'btns' }, h('button', { class: 'btn p', onclick: () => { lastCheckIn = Date.now(); store.set('lastCheckIn', lastCheckIn); checkInOpen = false; openQuiz(null); } }, 'Start setup'))));
     sheet.appendChild(presetGrid(k => {
       applyPreset(k);
       if (allMoods()[k].ask) { checkInAsk = k; renderPanel(); return; }
@@ -849,7 +954,15 @@
     const cur = currentPreset && allMoods()[currentPreset];
     b.appendChild(h('p', { class: 'big' }, cur ? cur.emoji + ' ' + cur.label : 'Custom mix'));
     b.appendChild(presetGrid(k => { applyPreset(k); renderPanel(); markDirty(); }));
+    const mp = currentMoodProfile();
+    if (cur) {
+      const tl = ts => (ts || []).map(t => (C.TYPE_DEFS[t] || {}).emoji + ' ' + ((C.TYPE_DEFS[t] || {}).label || t)).join(', ');
+      b.appendChild(h('p', { class: 'note', text: mp
+        ? 'Shows: ' + (tl(mp.like) || 'whatever fits') + (mp.avoid && mp.avoid.length ? ' · Keeps away: ' + tl(mp.avoid) : '') + (mp.maxMinutes ? ' · up to ' + mp.maxMinutes + ' min' : '')
+        : 'Shows whatever fits the settings below.' }));
+    }
     b.appendChild(h('div', { class: 'btns' },
+      cur ? h('button', { class: 'btn', onclick: () => openQuiz(currentPreset) }, '✎ Adjust what this mood shows') : null,
       h('button', { class: 'btn', onclick: () => openEditor(null, 'now') }, '＋ New mood'),
       cur && cur.custom ? h('button', { class: 'btn', onclick: () => openEditor(cur, 'now') }, '✎ Edit this mood') : null));
     if (cur && cur.ask) {
@@ -868,7 +981,9 @@
       } }, l)))));
     b.appendChild(row('Tone', null, seg([['light', 'Light-hearted'], ['balanced', 'Balanced'], ['any', 'Anything']], S.tone, v => setAndRefresh('tone', v))));
     b.appendChild(row('Politics', null, seg([['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']], S.politics, v => setAndRefresh('politics', v))));
-    b.appendChild(row('News', null, seg([['hide', 'No news'], ['show', 'News ok']], S.news, v => setAndRefresh('news', v))));
+    b.appendChild(row('News', null, seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.news, v => setAndRefresh('news', v))));
+    b.appendChild(row('Music', null, seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.music, v => setAndRefresh('music', v))));
+    b.appendChild(row('Emotional', 'Emotionally heavy, or dwelling in a feeling', seg([['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']], S.emotional, v => setAndRefresh('emotional', v))));
     b.appendChild(row('Distressing topics', 'Crime, war, disasters, horror', seg([['hide', 'Hide'], ['show', 'Allow']], S.distressing, v => setAndRefresh('distressing', v))));
     b.appendChild(row('Also show "fits no mood" videos', 'Videos you sorted into the "fits no mood" pile (' + Lr.noMoodVideos(learner).length + ')', check('includeNoMood', markDirty)));
     b.appendChild(row('Only clear matches', 'Hide videos that don\'t clearly fit the mode (also ones we can\'t classify)', check('strictNeed', markDirty)));
@@ -946,6 +1061,7 @@
     b.appendChild(row('Block parasocial videos', 'Vlogs, drama, reactions, “we need to talk”, streams', check('blockParasocial', markDirty)));
     b.appendChild(row('Block addictive patterns', 'Clickbait, rage bait, challenges, pranks', check('blockAddictive', markDirty)));
     b.appendChild(row('Hide Shorts', 'Feed shelves and the Shorts tab', check('hideShorts', markDirty)));
+    b.appendChild(row('Look up details for unclear videos', 'Asks YouTube for a video\'s category and tags (one small request each, only when unsure, remembered). Status: ' + enrichStatus, check('enrich', markDirty)));
     b.appendChild(row('Keep loading while the feed is nearly empty', 'Fetches more recommendations from YouTube in the background', check('autoFill')));
     b.appendChild(row('Hide community posts', 'Except when you pick the "Posts" chip above the feed, or on a channel\'s page', check('hidePosts', () => { updatePostsClass(); markDirty(); })));
     b.appendChild(row('Hide ad cards in feeds', 'Player ads are not touched', check('hideAds', markDirty)));
@@ -1160,13 +1276,16 @@
 
   function renderTeach(b) {
     const t = teach || (teach = { view: 'home' });
-    ({ home: teachHome, quick: teachQuick, sort: teachSort, editor: teachEditor })[t.view](b, t);
+    ({ home: teachHome, quick: teachQuick, sort: teachSort, editor: teachEditor, quiz: teachQuiz })[t.view](b, t);
   }
 
-  function teachHome(b) {
+  function teachHome(b, t) {
+    if (t && t.saved) b.appendChild(h('p', { class: 'note', text: '✓ Saved. Your moods now follow your answers – close this panel to refresh the feed.' }));
     b.appendChild(h('p', { class: 'big', text: 'Teach Mindful Feed what fits you' }));
     b.appendChild(h('p', { class: 'note', text: 'Everything is learned on this device – no API key needed. Similar videos (shared words or the same channel) follow your answers. With an API key, your answers also guide Claude.' }));
     b.appendChild(h('div', { class: 'choice' },
+      h('button', { class: 'preset', onclick: () => openQuiz(null) },
+        (profile ? '🧭 Redo the setup questions' : '🧭 Setup questions – what each mood means to you'), h('small', { text: 'About 5 minutes – most answers are pre-filled, just adjust. What feels easy or demanding to you, what helps in each mood, what to keep away.' })),
       h('button', { class: 'preset', onclick: () => { teach = { view: 'quick', asked: new Set(), queue: [], i: 0, step: 'ask', reasons: new Set(), answered: 0 }; teach.queue = buildQuickQueue(teach.asked, 10); renderPanel(); } },
         '✅ Quick check – ' + modeLabel(), h('small', { text: 'Yes / no for your current mood, 10 videos at a time.' })),
       h('button', { class: 'preset', onclick: () => { teach = { view: 'sort', skipped: new Set(), selected: new Set(), step: 'pick', sorted: 0, blockChannel: false }; renderPanel(); } },
@@ -1270,6 +1389,113 @@
     b.appendChild(loadMoreButton());
   }
 
+  // ---- setup questionnaire --------------------------------------------------
+  const COMMON_MOODS = ['drained', 'anxious', 'unwind', 'laugh', 'curious', 'focused', 'sleep'];
+
+  /** @param onlyMood set up just this mood (from "Adjust what this mood shows") */
+  function openQuiz(onlyMood) {
+    const prev = (profile && profile.answers) || {};
+    const answers = JSON.parse(JSON.stringify(prev));
+    answers.perMood = answers.perMood || {};
+    if (!answers.moods) answers.moods = COMMON_MOODS.filter(k => allMoods()[k]);
+    if (onlyMood && !answers.moods.includes(onlyMood)) answers.moods.push(onlyMood);
+    for (const k of answers.moods) prefillMood(answers, k);
+    teach = { view: 'quiz', answers, i: 0, onlyMood: onlyMood || null };
+    activeTab = 'teach'; panelOpen = true; fb = null; checkInOpen = false;
+    renderPanel();
+  }
+  function prefillMood(answers, k) {
+    if (answers.perMood[k]) return;
+    const d = Pr.moodProfileFor(null, k, allMoods()[k]) || { like: [], avoid: [] };
+    answers.perMood[k] = { like: (d.like || []).slice(), avoid: (d.avoid || []).slice(), maxMinutes: d.maxMinutes || 0, likeWords: '', avoidWords: '' };
+  }
+  function quizSteps(t) {
+    const steps = [];
+    if (!t.onlyMood) for (const q of Pr.GENERAL_QUESTIONS) steps.push({ q, mood: null });
+    const moods = t.onlyMood ? [t.onlyMood] : t.answers.moods.filter(k => allMoods()[k]);
+    for (const k of moods) for (const q of Pr.MOOD_QUESTIONS) steps.push({ q, mood: k });
+    steps.push({ q: { id: 'summary', type: 'summary' }, mood: null });
+    return steps;
+  }
+
+  function teachQuiz(b, t) {
+    const steps = quizSteps(t);
+    t.i = Math.max(0, Math.min(t.i, steps.length - 1));
+    const step = steps[t.i], q = step.q, A = t.answers;
+    const moodName = step.mood ? (allMoods()[step.mood].emoji + ' ' + allMoods()[step.mood].label.toLowerCase()) : '';
+    const target = step.mood ? (A.perMood[step.mood] = A.perMood[step.mood] || {}) : A;
+    const go = d => { t.i += d; renderPanel(); };
+    const nav = (nextLabel) => h('div', { class: 'btns' },
+      t.i > 0 ? h('button', { class: 'btn', onclick: () => go(-1) }, '‹ Back') : h('button', { class: 'btn', onclick: () => { teach = { view: 'home' }; renderPanel(); } }, 'Cancel'),
+      h('button', { class: 'btn p', onclick: () => go(1) }, nextLabel || 'Next ›'));
+
+    b.appendChild(h('p', { class: 'progress', text: q.type === 'summary' ? 'Almost done' : 'Question ' + (t.i + 1) + ' of ' + (steps.length - 1) + (step.mood ? ' · ' + moodName : '') }));
+    if (q.type === 'summary') return quizSummary(b, t);
+    b.appendChild(h('p', { class: 'big', text: q.q.replace('{mood}', moodName) }));
+    if (q.help) b.appendChild(h('p', { class: 'note', text: q.help }));
+
+    if (q.type === 'multi') {
+      let opts;
+      if (q.options === 'types') {
+        const exclude = q.id === 'avoid' ? (target.like || []) : q.id === 'hard' ? (A.easy || []) : [];
+        opts = C.TYPES.filter(k => !exclude.includes(k)).map(k => [k, C.TYPE_DEFS[k].emoji + ' ' + C.TYPE_DEFS[k].label]);
+      } else if (q.options === 'strain') opts = Object.keys(Pr.STRAIN).map(k => [k, Pr.STRAIN[k]]);
+      else opts = moodList().map(x => [x.key, x.label]);
+      const cur = new Set(target[q.id] || []);
+      b.appendChild(h('div', { class: 'chips' }, opts.map(([k, l]) => h('button', { class: 'tchip' + (cur.has(k) ? ' on' : ''), onclick: () => {
+        cur.has(k) ? cur.delete(k) : cur.add(k); target[q.id] = Array.from(cur);
+        if (q.id === 'moods') for (const m of target.moods) prefillMood(A, m);
+        renderPanel();
+      } }, l))));
+      b.appendChild(nav());
+    } else if (q.type === 'single') {
+      b.appendChild(h('div', { class: 'choice' }, q.options.map(([v, l]) => h('button', { class: 'preset' + (String(target[q.id]) === String(v) ? ' on' : ''), onclick: () => { target[q.id] = v; go(1); } }, l))));
+      b.appendChild(nav('Skip ›'));
+    } else if (q.type === 'words') {
+      const mk = (key, ph) => { const i = h('input', { type: 'text', placeholder: ph, style: 'width:100%;margin:4px 0' }); i.value = target[key] || ''; i.addEventListener('input', () => { target[key] = i.value; }); return i; };
+      b.appendChild(h('p', { class: 'note', text: 'Perfect for this mood:' }));
+      b.appendChild(mk('likeWords', 'e.g. lofi, Bob Ross, Stardew Valley'));
+      b.appendChild(h('p', { class: 'note', text: 'Keep away:' }));
+      b.appendChild(mk('avoidWords', 'e.g. true crime, reaction, election'));
+      b.appendChild(nav());
+    }
+  }
+
+  function quizSummary(b, t) {
+    const A = t.answers;
+    const built = Pr.build(A);
+    const tl = ts => (ts || []).map(k => (C.TYPE_DEFS[k] || {}).emoji || k).join(' ') || '–';
+    b.appendChild(h('p', { class: 'big', text: 'Here\'s what Mindful Feed will do' }));
+    if (!t.onlyMood) {
+      const cal = built.calibration;
+      b.appendChild(h('p', { class: 'note', text: 'Easy for you: ' + tl(cal.easy) + ' · Demanding for you: ' + tl(cal.hard) +
+        (cal.strain.length ? ' · Tiring: ' + cal.strain.map(k => Pr.STRAIN[k].toLowerCase()).join(', ') : '') +
+        (cal.lengthMin ? ' · Feels long after ' + cal.lengthMin + ' min' : '') }));
+    }
+    for (const k of Object.keys(built.moodProfiles)) {
+      if (t.onlyMood && k !== t.onlyMood) continue;
+      if (!allMoods()[k]) continue;
+      const mp = built.moodProfiles[k], o = built.overrides[k] || {};
+      b.appendChild(h('div', { class: 'log' },
+        h('div', { text: allMoods()[k].emoji + ' ' + allMoods()[k].label }),
+        h('div', { class: 'r', text: 'Shows ' + tl(mp.like) + ' · keeps away ' + tl(mp.avoid) + (mp.maxMinutes ? ' · up to ' + mp.maxMinutes + ' min' : '') +
+          (o.emotional ? ' · emotional: ' + (o.emotional === 'show' ? 'allowed' : 'hidden') : '') +
+          (mp.likeWords.length ? ' · + ' + mp.likeWords.join(', ') : '') + (mp.avoidWords.length ? ' · − ' + mp.avoidWords.join(', ') : '') })));
+    }
+    b.appendChild(h('div', { class: 'btns' },
+      h('button', { class: 'btn', onclick: () => { t.i--; renderPanel(); } }, '‹ Back'),
+      h('button', { class: 'btn p', onclick: () => {
+        const merged = t.onlyMood && profile ? Pr.build(Object.assign({}, profile.answers, { perMood: Object.assign({}, profile.answers.perMood, { [t.onlyMood]: A.perMood[t.onlyMood] }), moods: Array.from(new Set((profile.answers.moods || []).concat([t.onlyMood]))) })) : built;
+        profile = merged; saveProfile();
+        profiles.clear();
+        if (currentPreset && allMoods()[currentPreset]) applyPreset(currentPreset);
+        markDirty();
+        teach = { view: 'home', saved: true };
+        if (t.onlyMood) activeTab = 'now';
+        renderPanel();
+      } }, 'Save & apply')));
+  }
+
   // ---- mood editor ----------------------------------------------------------
   const EMOJIS = ['🎵', '🎮', '🍳', '🌍', '🐾', '🎨', '📖', '🏃', '🧘', '✨', '🌊', '🔧', '🚀', '☕'];
 
@@ -1312,6 +1538,20 @@
     b.appendChild(row('Politics', null, segSet('politics', [['hide', 'Apolitical'], ['show', 'Both'], ['only', 'Only political']])));
     b.appendChild(row('News', null, segSet('news', [['hide', 'No'], ['show', 'Yes']])));
     b.appendChild(row('Distressing topics', null, segSet('distressing', [['hide', 'Hide'], ['show', 'Allow']])));
+    if (!st.music) st.music = 'show';
+    if (!st.emotional) st.emotional = 'show';
+    b.appendChild(row('Music', null, segSet('music', [['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']])));
+    b.appendChild(row('Emotional', null, segSet('emotional', [['hide', 'Hide'], ['show', 'Allow'], ['only', 'Only']])));
+    const prof = d.profile = d.profile || { like: [], avoid: [], maxMinutes: null, likeWords: [], avoidWords: [] };
+    const typeChips = (key, other) => h('div', { class: 'chips' }, C.TYPES.filter(k => !(prof[other] || []).includes(k)).map(k =>
+      h('button', { class: 'tchip' + ((prof[key] || []).includes(k) ? ' on' : ''), onclick: () => {
+        const set = new Set(prof[key] || []); set.has(k) ? set.delete(k) : set.add(k); prof[key] = Array.from(set); renderPanel();
+      } }, C.TYPE_DEFS[k].emoji + ' ' + C.TYPE_DEFS[k].label)));
+    b.appendChild(h('h3', { text: 'What fits this mood' }));
+    b.appendChild(typeChips('like', 'avoid'));
+    b.appendChild(h('h3', { text: 'Keep away' }));
+    b.appendChild(typeChips('avoid', 'like'));
+    b.appendChild(row('Longest videos', null, seg([[0, 'Any'], [10, '10 min'], [20, '20 min'], [45, '45 min']], prof.maxMinutes || 0, v => { prof.maxMinutes = v || null; renderPanel(); })));
     const inc = h('input', { type: 'checkbox' }); inc.checked = !!st.includeNoMood;
     inc.addEventListener('change', () => { st.includeNoMood = inc.checked; });
     b.appendChild(row('Also show the whole "fits no mood" pile', null, inc));

@@ -191,7 +191,8 @@ test('check-in appears and a preset re-filters the feed', { skip: !chromium && '
   assert.ok(ids.includes('vid_relax01'));
   assert.ok(ids.includes('vid_garden1'));
   assert.ok(!ids.includes('vid_info001'), 'informational is not for a drained state');
-  assert.ok(!ids.includes('vid_laugh01'), 'drained = relax need only');
+  assert.ok(ids.includes('vid_laugh01'), 'light comedy helps when drained (default mood profile)');
+  assert.ok(!ids.includes('vid_lect001') && !ids.includes('vid_crime01'));
   const shelf = await page.evaluate(() => window.MindfulFeed.shelf().map(x => x.id));
   assert.ok(shelf.includes('vid_info001'));
   assert.equal(await page.locator('#mindful-feed-ui').locator('.sheet').count(), 0, 'check-in should not reappear');
@@ -390,5 +391,80 @@ test('Load more fetches further recommendations from YouTube; a near-empty feed 
   const after = await page.evaluate(() => window.MindfulFeed.verdicts.size);
   assert.ok(after > before, before + ' → ' + after);
   assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('setup questionnaire: answers shape what each mood shows', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  await page.goto('https://m.youtube.com/');
+  const ui = page.locator('#mindful-feed-ui');
+  await ui.getByRole('button', { name: /Start setup/ }).click();
+  const q = () => ui.locator('.big').first().innerText();
+  const next = () => ui.getByRole('button', { name: /^(Next|Skip) ›$/ }).click();
+  assert.match(await q(), /worn out/);
+  await ui.getByRole('button', { name: /Gaming/ }).click(); await next();          // easy
+  await ui.getByRole('button', { name: /Video essays/ }).click(); await next();    // demanding
+  await ui.getByRole('button', { name: /Emotional topics/ }).click(); await next(); // what tires you
+  await ui.getByRole('button', { name: /About 20 minutes/ }).click();              // length (auto-advances)
+  assert.match(await q(), /feeling low/);
+  await ui.getByRole('button', { name: /meets me where I am/ }).click();
+  await ui.getByRole('button', { name: /Tense, worried/ }).click();
+  await next();                                                                      // creators: skip
+  assert.match(await q(), /Which moods/);
+  for (const name of [/Anxious/, /Just unwinding/, /Need a laugh/, /Curious/, /Focused/, /Winding down/]) await ui.getByRole('button', { name }).click();
+  await next();
+  assert.match(await q(), /drained, what actually helps/);
+  await ui.getByRole('button', { name: /Gaming/ }).click(); await next();
+  await next();                                                                      // avoid: keep defaults
+  await ui.getByRole('button', { name: /Up to 20 minutes/ }).click();
+  await ui.locator('input[placeholder^="e.g. lofi"]').fill('stardew, bob ross');
+  await next();
+  assert.match(await ui.locator('.sheet').innerText(), /Here's what Mindful Feed will do/);
+  await ui.getByRole('button', { name: /Save & apply/ }).click();
+  const p = await page.evaluate(() => JSON.parse(localStorage.getItem('mindful:profile')));
+  assert.deepEqual(p.calibration.easy, ['gaming']);
+  assert.deepEqual(p.calibration.hard, ['essays']);
+  assert.equal(p.calibration.lengthMin, 20);
+  assert.ok(p.moodProfiles.drained.like.includes('gaming'));
+  assert.equal(p.moodProfiles.drained.maxMinutes, 20);
+  assert.deepEqual(p.moodProfiles.drained.likeWords, ['stardew', 'bob ross']);
+  assert.equal(p.overrides.drained.emotional, 'show');
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('unclear videos are kept hidden while YouTube\'s category is looked up, then decided', { skip: !chromium && 'playwright not installed' }, async () => {
+  const ctx = await browser.newContext({ viewport: { width: 400, height: 800 } });
+  await ctx.addInitScript(() => {
+    localStorage.setItem('mindful:lastCheckIn', String(Date.now()));
+    localStorage.setItem('mindful:preset', JSON.stringify('drained'));
+    localStorage.setItem('mindful:settings', JSON.stringify({ need: 'relax', loads: [0], tone: 'light', strictNeed: true, music: 'show', emotional: 'hide' }));
+  });
+  await ctx.addInitScript({ content: bundle() });
+  const data = { contents: { singleColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { content: { richGridRenderer: { contents: [
+    { richItemRenderer: { content: vwc('aurora00001', 'Aurora borealis over Lofoten', 'Northern Sky', '58:00') } },
+    { richItemRenderer: { content: vwc('lecture0001', 'Northern lights tonight', 'Sky Uni', '48:00') } },
+  ] } } } }] } } };
+  const lookups = [];
+  await ctx.route('**/*', async route => {
+    const url = new URL(route.request().url());
+    if (url.hostname !== 'm.youtube.com') return route.abort();
+    if (url.pathname === '/youtubei/v1/player') {
+      const body = JSON.parse(route.request().postData());
+      lookups.push(body.videoId);
+      const cat = body.videoId === 'aurora00001' ? { category: 'Music', kw: ['ambient', 'relaxing music', 'sleep'] } : { category: 'Education', kw: ['physics', 'lecture'] };
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ videoDetails: { videoId: body.videoId, keywords: cat.kw, shortDescription: 'x' }, microformat: { playerMicroformatRenderer: { category: cat.category } } }) });
+    }
+    return route.fulfill({ contentType: 'text/html', body: `<!doctype html><html><body>${RENDER}<script>window.ytcfg = { get: k => ({ INNERTUBE_CONTEXT: { client: { clientName: 'MWEB', clientVersion: '2.0' } } })[k] };</script>
+      <script>var ytInitialData = ${JSON.stringify(data)};</script><div id="feed"></div>
+      <script>renderItems(ytInitialData.contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.richGridRenderer.contents, document.getElementById('feed'));</script></body></html>` });
+  });
+  const page = await ctx.newPage();
+  await page.goto('https://m.youtube.com/');
+  await page.waitForFunction(() => { const e = JSON.parse(localStorage.getItem('mindful:enrich') || '{}'); return e.aurora00001 && e.lecture0001; }, null, { timeout: 10000 });
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('#feed a[href$="aurora00001"]').closest('ytm-rich-item-renderer')).display !== 'none', null, { timeout: 5000 });
+  const ids = await renderedIds(page);
+  assert.deepEqual(ids, ['aurora00001'], 'ambient music fits "drained", the educational one does not');
+  assert.deepEqual(lookups.sort(), ['aurora00001', 'lecture0001']);
   await ctx.close();
 });
