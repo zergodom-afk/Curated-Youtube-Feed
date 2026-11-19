@@ -50,6 +50,8 @@ export const HOME_ITEMS = [
   ['vid_garden1', 'Cozy cottage garden tour in spring', 'Slow Living', '18:20'],
 ];
 
+export const post = (id, text) => ({ backstagePostThreadRenderer: { post: { backstagePostRenderer: { postId: id, contentText: { runs: [{ text }] } } } } });
+
 export function homeBrowse() {
   const items = HOME_ITEMS.map(([id, t, c, l], i) => {
     if (i % 3 === 0) return rich({ videoRenderer: videoRenderer(id, t, c, l) });
@@ -59,6 +61,8 @@ export function homeBrowse() {
   items.splice(3, 0, { richSectionRenderer: { content: { reelShelfRenderer: { items: [{ reelItemRenderer: { videoId: 'short000001', headline: simple('funny dog') } }] } } } });
   items.splice(5, 0, { richItemRenderer: { content: { adSlotRenderer: { adSlotMetadata: {} } } } });
   items.push({ richSectionRenderer: { content: { richShelfRenderer: { isShorts: true, contents: [rich({ shortsLockupViewModel: { entityId: 'shorts-shelf-item-short000002', overlayMetadata: { primaryText: { content: 'wait for it' } } } })] } } } });
+  items.splice(2, 0, rich(post('post_one', 'Hey everyone, quick update from me!')));
+  items.splice(7, 0, { richSectionRenderer: { content: { richShelfRenderer: { title: runs('Latest YouTube posts'), contents: [rich(post('post_two', 'Poll: what next?')), rich(post('post_three', 'New merch!'))] } } } });
   items.push({ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: 'NEXT' } } } });
   return {
     responseContext: {},

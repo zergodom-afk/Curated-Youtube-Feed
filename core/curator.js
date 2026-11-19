@@ -66,6 +66,8 @@
   let panelOpen = false, activeTab = 'now', checkInOpen = false;
   let styleEl = null, scanQueued = false, dirty = false;
   let lastHref = location.href, lastWatched = null;
+  let postsChip = false, lastPath = location.pathname;                      // the "Posts" chip above the feed is selected
+  let pageShown = new Set(), pageHeld = new Set(), statEl = null;
   let checkInAsk = null;                       // preset key whose follow-up question is showing
   let fb = null;                               // open feedback sheet: {meta, step, reasons:Set, blockChannel}
   let teach = null;                            // wizard: {queue, i, step, reasons:Set, answered}
@@ -145,6 +147,11 @@
     const { prof, d } = decisionFor(meta, context);
     const prev = verdicts.get(meta.id);
     verdicts.set(meta.id, { meta, prof, d, context });
+    if (context === 'home' || context === 'subscriptions') {
+      (d.action === 'show' ? pageShown : pageHeld).add(meta.id);
+      (d.action === 'show' ? pageHeld : pageShown).delete(meta.id);
+      updateStat();
+    }
     if (!prev || prev.d.action !== d.action) {
       if (d.action !== 'show') {
         // one entry per video: a reload re-evaluates the same items
@@ -218,9 +225,9 @@
         const vid = (body && body.videoId) || currentVideoId();
         if (S.disableAutoplay) X.pruneAutoplay(json);
         if (S.hideRelated) {
-          X.prune(json, { watchPage: true, currentVideoId: vid, hideAds: S.hideAds, hideShorts: S.hideShorts });
+          X.prune(json, { watchPage: true, currentVideoId: vid, hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn('related') });
         } else {
-          X.prune(json, { decide: m => toVerdict(evaluate(m, 'related')), hideAds: S.hideAds, hideShorts: S.hideShorts });
+          X.prune(json, { decide: m => toVerdict(evaluate(m, 'related')), hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn('related') });
         }
         return json;
       }
@@ -229,13 +236,33 @@
       if (context === 'watch') context = 'related';
       X.prune(json, {
         decide: m => (m.id ? toVerdict(evaluate(m, context)) : { remove: false }),
-        hideAds: S.hideAds, hideShorts: S.hideShorts,
+        hideAds: S.hideAds, hideShorts: S.hideShorts, hidePosts: hidePostsIn(context),
       });
     } catch (e) {
       console.warn('[MindfulFeed] transform failed', e);
     }
     return json;
   }
+  /** Posts stay only where you asked for them: the "Posts" chip, or a channel's own page. */
+  function hidePostsIn(context) { return !!S.hidePosts && !postsChip && context !== 'channel'; }
+
+  const POSTS_CHIP_RE = /^(posts?|community( posts)?|beitr(ä|ae)ge|community-beitr(ä|ae)ge|publicaciones|publications|posts de la comunidad)$/i;
+  function chipText(el) {
+    const chip = el && el.closest && el.closest('ytm-chip-cloud-chip-renderer,yt-chip-cloud-chip-renderer,chip-shape,yt-chip-shape,.chip-bar-contents [role="tab"],ytm-feed-filter-chip-bar-renderer [role="tab"]');
+    return chip ? (chip.textContent || '').trim().replace(/\s+/g, ' ') : null;
+  }
+  // Remember which chip you tap before YouTube fetches that chip's feed.
+  document.addEventListener('click', e => {
+    const t = chipText(e.target);
+    if (t == null) return;
+    postsChip = POSTS_CHIP_RE.test(t);
+    updatePostsClass();
+  }, true);
+  function updatePostsClass() {
+    if (!document.documentElement) return;
+    document.documentElement.classList.toggle('mf-hide-posts', hidePostsIn(normalizeCtx(pageContext())));
+  }
+
   function toVerdict(d) { return { remove: d.action !== 'show', reason: d.reason }; }
 
   function transformText(kind, raw, reqBody) {
@@ -355,6 +382,14 @@
     if (S.hideShorts) {
       rules.push('ytm-reel-shelf-renderer,ytm-shorts-lockup-view-model,ytm-shorts-lockup-view-model-v2,ytd-reel-shelf-renderer,ytd-rich-shelf-renderer[is-shorts],grid-shelf-view-model:has(ytm-shorts-lockup-view-model),ytm-rich-section-renderer:has(ytm-shorts-lockup-view-model),ytm-rich-section-renderer:has(ytm-reel-shelf-renderer),ytm-pivot-bar-item-renderer:has(.pivot-shorts),ytd-guide-entry-renderer:has(a[title="Shorts"]),ytd-mini-guide-entry-renderer[aria-label="Shorts"]{display:none!important}');
     }
+    if (S.hidePosts) {
+      const posts = ['ytm-backstage-post-thread-renderer', 'ytm-backstage-post-renderer', 'ytm-post-renderer', 'ytm-shared-post-renderer',
+        'ytd-backstage-post-thread-renderer', 'ytd-backstage-post-renderer', 'ytd-post-renderer', 'ytd-shared-post-renderer', 'ytm-post-view-model', 'ytd-post-view-model'];
+      const sel = [];
+      for (const p of posts) sel.push('html.mf-hide-posts ' + p, 'html.mf-hide-posts ytm-rich-item-renderer:has(' + p + ')', 'html.mf-hide-posts ytd-rich-item-renderer:has(' + p + ')',
+        'html.mf-hide-posts ytm-rich-section-renderer:has(' + p + ')', 'html.mf-hide-posts ytd-rich-section-renderer:has(' + p + ')');
+      rules.push(sel.join(',') + '{display:none!important}');
+    }
     if (S.hideAds) {
       rules.push('ytm-promoted-sparkles-web-renderer,ytm-companion-ad-renderer,ad-slot-renderer,ytm-ad-slot-renderer,ytd-ad-slot-renderer,ytm-rich-item-renderer:has(ad-slot-renderer),ytd-rich-item-renderer:has(ytd-ad-slot-renderer){display:none!important}');
     }
@@ -460,6 +495,12 @@
     if (location.href === lastHref && lastWatched) return;
     lastHref = location.href;
     document.documentElement.classList.toggle('mf-watch', pageContext() === 'watch');
+    if (location.pathname !== lastPath) {
+      // A different page starts with the "All" chip and a fresh count.
+      lastPath = location.pathname;
+      postsChip = false; pageShown.clear(); pageHeld.clear(); updateStat();
+    }
+    updatePostsClass();
     updateWatchChip();
     queueScan();
     const vid = currentVideoId();
@@ -590,6 +631,8 @@
   .chip{position:fixed;right:70px;bottom:80px;z-index:2147483000;border:none;border-radius:999px;padding:8px 12px;
     background:var(--bg);color:var(--fg);box-shadow:0 2px 10px rgba(0,0,0,.2);font:500 13px system-ui,sans-serif;cursor:pointer}
   .chip.rate{bottom:128px}
+  .stat{position:fixed;right:14px;bottom:128px;z-index:2147483000;border:none;border-radius:999px;padding:5px 10px;
+    background:var(--bg);color:var(--fg);box-shadow:0 2px 8px rgba(0,0,0,.2);font:500 12px system-ui,sans-serif;cursor:pointer}
   .progress{color:var(--mut);font-size:12.5px;margin:0 0 6px}
   .choice{display:flex;flex-direction:column;gap:8px;margin:10px 0}
   .choice .preset{width:100%}
@@ -660,6 +703,8 @@
       openFeedback(v ? v.meta : { id: vid, title: (document.title || '').replace(/\s*-\s*YouTube\s*$/, ''), channel: '', kind: 'video' });
     } }, '👍👎 Fits my mode?');
     wrapEl.appendChild(rateChipEl);
+    statEl = h('button', { class: 'stat', style: 'display:none', title: 'Videos YouTube offered on this page', onclick: () => openPanel('log') });
+    wrapEl.appendChild(statEl);
     document.body.appendChild(host);
     updateFabDot(); updateWatchChip();
   }
@@ -671,6 +716,14 @@
     chipEl.style.display = show ? '' : 'none';
     if (rateChipEl) rateChipEl.style.display = pageContext() === 'watch' && vid ? '' : 'none';
     if (show) chipEl.textContent = shelf.some(x => x.id === vid) ? '✓ On your shelf' : '＋ Later shelf';
+  }
+
+  function updateStat() {
+    if (!statEl) return;
+    const c = pageContext();
+    const show = (c === 'home' || c === 'subscriptions') && S.enabled && (pageShown.size + pageHeld.size) > 0;
+    statEl.style.display = show ? '' : 'none';
+    if (show) statEl.textContent = '▶ ' + pageShown.size + ' shown · ' + pageHeld.size + ' held back';
   }
 
   function updateFabDot() {
@@ -868,6 +921,7 @@
     b.appendChild(row('Block parasocial videos', 'Vlogs, drama, reactions, “we need to talk”, streams', check('blockParasocial', markDirty)));
     b.appendChild(row('Block addictive patterns', 'Clickbait, rage bait, challenges, pranks', check('blockAddictive', markDirty)));
     b.appendChild(row('Hide Shorts', 'Feed shelves and the Shorts tab', check('hideShorts', markDirty)));
+    b.appendChild(row('Hide community posts', 'Except when you pick the "Posts" chip above the feed, or on a channel\'s page', check('hidePosts', () => { updatePostsClass(); markDirty(); })));
     b.appendChild(row('Hide ad cards in feeds', 'Player ads are not touched', check('hideAds', markDirty)));
     b.appendChild(h('h3', { text: 'While watching' }));
     b.appendChild(row('No recommendations under videos', 'Also removes suggestions next to comments', check('hideRelated')));
@@ -1095,6 +1149,7 @@
   function boot() {
     initNative();
     applyCss();
+    updatePostsClass();
     expireShelf();
     mountUi();
     const mo = new MutationObserver(queueScan);

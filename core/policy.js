@@ -30,6 +30,7 @@
     blockAddictive: true,
     addictiveThreshold: 3,
     hideShorts: true,
+    hidePosts: true,      // community posts – only shown when the "Posts" chip is selected or on a channel's posts tab
     hideAds: false,       // in-feed ad cards only; player ads are never touched
     strictNeed: true,     // only videos that clearly match the chosen need (unclassified ones are hidden)
     // ---- watch page ----

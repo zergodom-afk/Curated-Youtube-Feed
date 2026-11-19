@@ -34,6 +34,26 @@
     'compactAutoplayRenderer', 'continuationItemRenderer', 'chipCloudRenderer',
     'feedFilterChipBarRenderer', 'relatedChipCloudRenderer', 'merchandiseShelfRenderer',
   ];
+  // Community posts (text/image posts, polls, shared posts) in all known shapes.
+  const POST_KEY_RE = /^(backstagePost(Thread)?Renderer|post(Thread)?Renderer|sharedPostRenderer|postViewModel|postMultiImageRenderer|backstageImageRenderer|pollRenderer)$/;
+  function isPostElement(el) {
+    if (!el || typeof el !== 'object' || Array.isArray(el)) return false;
+    let o = el;
+    if (o.richItemRenderer && o.richItemRenderer.content) o = o.richItemRenderer.content;
+    if (o.richSectionRenderer && o.richSectionRenderer.content) o = o.richSectionRenderer.content;
+    for (const k of Object.keys(o)) {
+      if (POST_KEY_RE.test(k)) return true;
+      if (k === 'lockupViewModel' && /POST/.test(String(o[k] && o[k].contentType))) return true;
+    }
+    // A shelf / section whose items are all posts ("Latest YouTube posts").
+    const shelf = o.richShelfRenderer || o.shelfRenderer || o.itemSectionRenderer || o.horizontalListRenderer;
+    if (shelf) {
+      const list = shelf.contents || shelf.items || (shelf.content && (shelf.content.horizontalListRenderer || {}).items) || [];
+      if (Array.isArray(list) && list.length && list.every(isPostElement)) return true;
+    }
+    return false;
+  }
+
   const AD_KEYS = ['adSlotRenderer', 'promotedVideoRenderer', 'compactPromotedVideoRenderer', 'promotedSparklesWebRenderer', 'statementBannerRenderer', 'bannerPromoRenderer'];
 
   const SKIP_TEXT_KEYS = new Set([
@@ -167,12 +187,12 @@
    *   onItem(meta, verdict)   optional observer
    *   watchPage: boolean      remove ALL recommendations (keeps playlists)
    *   currentVideoId: string
-   *   hideShorts: boolean, hideAds: boolean
+   *   hideShorts: boolean, hideAds: boolean, hidePosts: boolean
    * }
    * @returns stats {seen, removed}
    */
   function prune(data, opts) {
-    const stats = { seen: 0, removed: 0, shelvesRemoved: 0 };
+    const stats = { seen: 0, removed: 0, shelvesRemoved: 0, postsRemoved: 0 };
     if (!data || typeof data !== 'object') return stats;
 
     function visit(node, depth, protectedCtx) {
@@ -201,6 +221,7 @@
 
     function shouldDropElement(el) {
       if (!el || typeof el !== 'object') return false;
+      if (opts.hidePosts && isPostElement(el)) { stats.postsRemoved++; return true; }
       if (opts.hideAds && AD_KEYS.some(k => el[k] || (el.richItemRenderer && el.richItemRenderer.content && el.richItemRenderer.content[k]))) {
         stats.removed++; return true;
       }
@@ -255,6 +276,6 @@
     return !!(data && data.contents && (data.contents.singleColumnWatchNextResults || data.contents.twoColumnWatchNextResults));
   }
 
-  root.MindfulExtractor = { prune, prunePlayer, pruneAutoplay, extractMeta, unwrapItem, isWatchNext, text, ITEM_KEYS };
+  root.MindfulExtractor = { prune, prunePlayer, pruneAutoplay, extractMeta, unwrapItem, isWatchNext, isPostElement, text, ITEM_KEYS };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.MindfulExtractor;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

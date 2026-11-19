@@ -38,6 +38,20 @@ test('prunes items by verdict, removes Shorts shelves and ads, keeps continuatio
   assert.ok(stats.removed >= 2);
 });
 
+test('community posts: removed with hidePosts (single items and "Latest posts" shelves), kept otherwise', () => {
+  const kept = homeBrowse();
+  X.prune(kept, { hidePosts: false });
+  for (const id of ['post_one', 'post_two', 'post_three']) assert.ok(JSON.stringify(kept).includes(id));
+  const data = homeBrowse();
+  const stats = X.prune(data, { hidePosts: true });
+  const s = JSON.stringify(data);
+  for (const id of ['post_one', 'post_two', 'post_three']) assert.ok(!s.includes(id), id);
+  assert.ok(s.includes('vid_relax01') && s.includes('"NEXT"'));
+  assert.equal(stats.postsRemoved, 2);
+  assert.equal(X.isPostElement({ lockupViewModel: { contentType: 'LOCKUP_CONTENT_TYPE_POST' } }), true);
+  assert.equal(X.isPostElement({ lockupViewModel: { contentType: 'LOCKUP_CONTENT_TYPE_VIDEO' } }), false);
+});
+
 test('watch page: removes all recommendations, keeps playlist, comments and current video', () => {
   const data = watchNext('current0001');
   X.pruneAutoplay(data);

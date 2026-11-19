@@ -5,7 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { bundle } from '../../scripts/build.mjs';
-import { homeBrowse, watchNext, playerResponse, vwc } from '../fixtures.mjs';
+import { homeBrowse, watchNext, playerResponse, vwc, post } from '../fixtures.mjs';
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -22,6 +22,8 @@ const RENDER = `
       else if (o.lockupViewModel) root.appendChild(card('ytm-rich-item-renderer', o.lockupViewModel.contentId, o.lockupViewModel.metadata.lockupMetadataViewModel.title.content));
       else if (o.videoWithContextRenderer) root.appendChild(card(it.richItemRenderer ? 'ytm-rich-item-renderer' : 'ytm-video-with-context-renderer', o.videoWithContextRenderer.videoId, txt(o.videoWithContextRenderer.headline)));
       else if (o.adSlotRenderer) root.appendChild(card('ytm-rich-item-renderer', 'AD_________', 'AD'));
+      else if (o.backstagePostThreadRenderer) { const el = document.createElement('ytm-backstage-post-thread-renderer'); el.textContent = 'POST'; root.appendChild(el); }
+      else if (it.richSectionRenderer && it.richSectionRenderer.content.richShelfRenderer && !it.richSectionRenderer.content.richShelfRenderer.isShorts) renderItems(it.richSectionRenderer.content.richShelfRenderer.contents, root);
       else if (it.richSectionRenderer) root.appendChild(card('ytm-reel-shelf-renderer', 'short000001', 'SHORTS SHELF'));
       else if (it.itemSectionRenderer) renderItems(it.itemSectionRenderer.contents, root);
       else if (it.reelShelfRenderer) root.appendChild(card('ytm-reel-shelf-renderer', 'short000009', 'SHORTS SHELF'));
@@ -33,8 +35,15 @@ function homeHtml() {
   return `<!doctype html><html><head><title>YouTube</title></head><body>
   ${RENDER}
   <script>var ytInitialData = ${JSON.stringify(homeBrowse())};</script>
+  <ytm-feed-filter-chip-bar-renderer><ytm-chip-cloud-chip-renderer id="chip-all">All</ytm-chip-cloud-chip-renderer><ytm-chip-cloud-chip-renderer id="chip-posts"><span>Posts</span></ytm-chip-cloud-chip-renderer></ytm-feed-filter-chip-bar-renderer>
   <div id="feed"></div>
   <script>
+    document.getElementById('chip-posts').addEventListener('click', async () => {
+      const r = await fetch('/youtubei/v1/browse', { method: 'POST', body: JSON.stringify({ continuation: 'CHIP_POSTS' }) });
+      const j = await r.json(); const f = document.getElementById('feed'); f.textContent = '';
+      renderItems(j.onResponseReceivedActions[0].appendContinuationItemsAction.continuationItems, f);
+      window.chipLoaded = true;
+    });
     const d = window.ytInitialData;
     renderItems(d.contents.singleColumnBrowseResultsRenderer.tabs[0].tabRenderer.content.richGridRenderer.contents, document.getElementById('feed'));
     window.loadMore = async () => {
@@ -71,6 +80,12 @@ const continuation = {
     { continuationItemRenderer: {} },
   ] } }],
 };
+const postsChipResponse = {
+  onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [
+    { richItemRenderer: { content: post('chip_post1', 'A post you asked for') } },
+    { richItemRenderer: { content: post('chip_post2', 'Another post') } },
+  ] } }],
+};
 const nextContinuation = {
   onResponseReceivedEndpoints: [{ appendContinuationItemsAction: { continuationItems: [
     vwc('rel_more001', 'Another related video', 'X', '9:00'),
@@ -87,7 +102,10 @@ async function newPage() {
   await ctx.route('**/*', async route => {
     const url = new URL(route.request().url());
     if (url.hostname !== 'm.youtube.com') return route.abort();
-    if (url.pathname === '/youtubei/v1/browse') return route.fulfill({ contentType: 'application/json', body: JSON.stringify(continuation) });
+    if (url.pathname === '/youtubei/v1/browse') {
+      const body = route.request().postData() || '';
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body.includes('CHIP_POSTS') ? postsChipResponse : continuation) });
+    }
     if (url.pathname === '/youtubei/v1/next') return route.fulfill({ contentType: 'application/json', body: JSON.stringify(nextContinuation) });
     if (url.pathname === '/watch') return route.fulfill({ contentType: 'text/html', body: watchHtml(url.searchParams.get('v')) });
     return route.fulfill({ contentType: 'text/html', body: homeHtml() });
@@ -120,6 +138,25 @@ test('home feed is filtered before rendering; continuation via fetch is filtered
   // The demanding lecture was caught on the Later shelf instead of being lost.
   const shelf = await page.evaluate(() => window.MindfulFeed.shelf().map(x => x.id));
   assert.ok(shelf.includes('vid_lect001'), 'lecture should be on the shelf: ' + shelf.join());
+  assert.equal(await page.locator('#feed ytm-backstage-post-thread-renderer').count(), 0, 'community posts removed from the home feed');
+  assert.match(await page.locator('#mindful-feed-ui .stat').innerText(), /\d+ shown · \d+ held back/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('community posts appear only when the "Posts" chip is selected', { skip: !chromium && 'playwright not installed' }, async () => {
+  const { page, ctx, errors } = await newPage();
+  await page.addInitScript(() => localStorage.setItem('mindful:lastCheckIn', String(Date.now())));
+  await page.goto('https://m.youtube.com/');
+  assert.equal(await page.locator('#feed ytm-backstage-post-thread-renderer').count(), 0);
+  await page.locator('#chip-posts').click();
+  await page.waitForFunction(() => window.chipLoaded);
+  const posts = page.locator('#feed ytm-backstage-post-thread-renderer');
+  assert.equal(await posts.count(), 2);
+  assert.equal(await posts.first().isVisible(), true, 'not hidden by CSS either');
+  // back to "All" → posts are hidden again
+  await page.locator('#chip-all').click();
+  assert.equal(await posts.first().isVisible(), false);
   assert.deepEqual(errors, []);
   await ctx.close();
 });

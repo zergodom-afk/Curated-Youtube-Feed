@@ -62,6 +62,8 @@ Everything can be fine-tuned:
 - **Parasocial** content is hidden: vlogs, life updates, drama, call-outs, reactions, "we need to talk", stream VODs.
 - **Addictive** patterns are hidden: clickbait, rage bait, ALL CAPS!!!, challenges, pranks, "wait for it".
 - **Shorts** are gone from the feed and from the bottom bar.
+- **Community posts** are hidden from the feed. They only appear when you
+  pick the **Posts** chip above the feed, or on a channel's own page.
 - **No recommendations while watching.** The related videos under the player
   and the suggestions near comments are removed, along with end screens, info
   cards and autoplay of the next video. Playlists you chose yourself stay.
